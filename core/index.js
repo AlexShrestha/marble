@@ -1,5 +1,5 @@
 /**
- * Marble — World → You
+ * Marblism — World → You
  *
  * Hyper-personalized story curation engine.
  * 100 stories in, 10 magical ones out.
@@ -90,9 +90,5 @@ export { ArcReranker } from './arc.js';
 export { Swarm, Clone, AGENT_LENSES } from './swarm.js';
 export { ClonePopulation, evaluateFitness } from './evolution.js';
 export { SignalProcessor } from './signals.js';
-export { InsightEngine } from './insight-engine.js';
-export { HypothesisTester } from './hypothesis-tester.js';
-export { SyntheticReasoner } from './synthetic-reasoner.js';
-export { ArchetypeGenerator } from './archetype-generator.js';
-export { RelationshipSimulator } from './relationship-simulator.js';
+export { Observer } from './observer.js';
 export { SCORE_WEIGHTS, ARC_SLOTS } from './types.js';

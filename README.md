@@ -12,71 +12,51 @@ Marble creates multiple simulated versions of a user, tests them against real-wo
 
 ## Why Marble?
 
-**Marble is NOT collaborative filtering.** Here's why that matters:
-
 ### Works from User One
-- **Collaborative filtering:** Needs thousands of similar users to make predictions
-- **Marble:** Creates multiple synthetic versions of YOU, tests them against real signals, evolves the best-predicting clone daily
+Creates multiple synthetic versions of a user, tests them against real signals, and evolves the best-predicting clone daily — no large user base required.
 
-### Predicts Business Context, Not Just Preferences
-- **CF:** "Users like you enjoyed this AI article"
-- **Marble:** "This AI safety piece addresses your CTO's concerns for today's 2pm investor meeting"
+### Predicts Business Context
+"This AI safety piece addresses your CTO's concerns for today's 2pm investor meeting" — not just topic matching, but timing and stakeholder awareness.
 
 ### Explains the WHY
-- **CF:** Similarity scores and "people also liked"
-- **Marble:** Hypothesis-driven insights with confidence scores — "Why this matters to your specific goals right now"
+Hypothesis-driven insights with confidence scores — "Why this matters to your specific goals right now."
 
 ### Synthesizes Missing Intelligence
-- **CF:** Limited to existing user behavior patterns
-- **Marble:** Generates insights about relationships, timing, and stakeholder concerns you never explicitly provided
+Generates insights about relationships, timing, and stakeholder concerns you never explicitly provided.
 
 ### Models Your Network
-- **CF:** Treats you as an isolated individual
-- **Marble:** Understands the people who influence your decisions and tailors recommendations for multi-party dynamics
+Understands the people who influence your decisions and tailors recommendations for multi-party dynamics.
 
-**The result:** Content that feels like *"How did it know I needed to see this today?"* instead of *"Other people liked this too."*
+**The result:** Content that feels like *"How did it know I needed to see this today?"*
 
 ## Marble vs. The Competition
 
-| Capability | **Marble** | Segment | Amplitude | CF Systems (Netflix, Spotify) |
-|------------|------------|---------|-----------|-------------------------------|
-| **Day-one intelligence** | ✅ Synthetic clones work immediately | ❌ Needs behavior data | ❌ Needs event tracking | ❌ Needs thousands of similar users |
-| **Temporal awareness** | ✅ Calendar, deadlines, project phases | ❌ Static segments | ❌ Historical analysis only | ❌ Time-blind recommendations |
-| **Relationship modeling** | ✅ Stakeholder concerns, decision dynamics | ❌ Individual traits only | ❌ User-level only | ❌ Individual preferences only |
-| **Business outcome focus** | ✅ Optimizes for your KPIs | 🟡 Engagement analytics | 🟡 Product metrics | ❌ Platform engagement only |
-| **Predictive reasoning** | ✅ "Why this will help your meeting" | ❌ Descriptive only | 🟡 What happened | ❌ "People also liked" |
-| **Privacy-first** | ✅ Runs locally, no data upload | ❌ Cloud-dependent | ❌ Cloud-dependent | ❌ Platform data collection |
+## What Marble Does
 
-### What Marble Can Do That CF Cannot
+| Capability | How |
+|------------|-----|
+| **Day-one intelligence** | Synthetic clones work immediately — no cold start |
+| **Temporal awareness** | Considers calendar, deadlines, project phases |
+| **Relationship modeling** | Understands stakeholder concerns and decision dynamics |
+| **Business outcome focus** | Optimizes for your KPIs, not generic engagement |
+| **Predictive reasoning** | "Why this will help your meeting" — not just similarity scores |
+| **Privacy-first** | Runs locally, no data upload required |
 
-**Scenario 1: Pre-Meeting Intelligence**
-- **CF Result:** "AI articles you might like"
-- **Marble Result:** "AI safety regulatory timeline — addresses your CTO's security concerns for today's 2pm funding call"
+### Real-World Scenarios
 
-**Scenario 2: Stakeholder Alignment**
-- **CF Result:** Recommends based on your past clicks
-- **Marble Result:** Surfaces technical validation stories because it knows your skeptical CTO influences purchasing decisions
+**Pre-Meeting Intelligence**
+"AI safety regulatory timeline — addresses your CTO's security concerns for today's 2pm funding call"
 
-**Scenario 3: Project Timing**
-- **CF Result:** Consistent recommendations regardless of context
-- **Marble Result:** Prioritizes launch-relevant content when you're 2 weeks from product release
+**Stakeholder Alignment**
+Surfaces technical validation stories because it knows your skeptical CTO influences purchasing decisions.
 
-**Scenario 4: Zero Data Cold Start**
-- **CF Result:** Random popular content until enough behavior accumulates
-- **Marble Result:** Immediate personalization through synthetic clone evolution
+**Project Timing**
+Prioritizes launch-relevant content when you're 2 weeks from product release.
 
-## Technical Architecture: Why This Isn't Just Better CF
+**Zero Data Cold Start**
+Immediate personalization through synthetic clone evolution — no waiting for behavior data.
 
-### CF: Static User-Item Matrix
-```javascript
-// Traditional approach
-const userItemMatrix = {
-  user123: { "article_1": 0.8, "article_2": 0.6 }
-};
-// Predict based on similar users' ratings
-```
-
-### Marble: Dynamic Context-Aware Knowledge Graph
+## Technical Architecture
 ```javascript
 // Marble approach
 const contextGraph = {

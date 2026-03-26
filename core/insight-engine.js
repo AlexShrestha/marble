@@ -12,7 +12,7 @@
  * Works with both real (observed) and synthetic data layers.
  */
 
-import { MarbleKG } from './kg.js';
+import { KnowledgeGraph as MarbleKG } from './kg.js';
 
 // ─── HEURISTIC PATTERN LIBRARY ────────────────────────────────────────────
 // Each pattern: { name, tags (topics that must co-occur), hypothesis, predictions }
@@ -886,22 +886,22 @@ export class InsightEngine {
   calculateInsightConfidence(signals, opts = {}) {
     if (!signals || signals.length === 0) return 0.1;
 
-    // ── 1. Enhanced signal count score with reinforcement ──
-    // Improved logarithmic scaling: 1=0, 2=0.10, 5=0.22, 10=0.32, 20=0.40, 50+ caps at 0.45
-    const baseCountScore = Math.min(0.35, Math.log2(signals.length + 1) * 0.08);
+    // ── 1. Enhanced signal count score with progressive thresholds ──
+    const enhancedCountScore = this._calculateEnhancedSignalCountScore(signals, opts.allSignals || []);
+    const countScore = enhancedCountScore;
 
-    // Signal reinforcement bonus - recurring similar signals boost confidence
-    const reinforcementScore = this._calculateSignalReinforcement(signals, opts.allSignals || []);
-    const countScore = Math.min(0.45, baseCountScore + reinforcementScore);
-
-    // ── 2. Multi-dimensional consistency ──
+    // ── 2. Multi-dimensional consistency with alignment bonuses ──
     const consistencyScores = this._calculateCrossDimensionalConsistency(signals);
-    const totalConsistencyScore = Math.min(0.25,
+    const baseConsistencyScore = Math.min(0.25,
       consistencyScores.directional * 0.08 +
       consistencyScores.topical * 0.06 +
       consistencyScores.contextual * 0.06 +
       consistencyScores.temporal * 0.05
     );
+
+    // Consistency alignment bonus - extra confidence when multiple dimensions align
+    const alignmentBonus = this._calculateConsistencyAlignmentBonus(consistencyScores);
+    const totalConsistencyScore = baseConsistencyScore + alignmentBonus;
 
     // ── 3. Cross-dimensional validation ──
     // Signals that are consistent across multiple dimensions get higher confidence
@@ -915,21 +915,25 @@ export class InsightEngine {
     const qualityScore = this._calculateSignalQuality(signals);
     const diversityScore = this._calculateSourceDiversity(signals);
 
-    // ── 6. Confidence decay based on signal freshness ──
+    // ── 6. Signal cluster quality assessment ──
+    const clusterQualityScore = this._calculateSignalClusterQuality(signals);
+
+    // ── 7. Confidence decay based on signal freshness ──
     const freshnessScore = this._calculateFreshnessScore(signals);
 
-    // ── 7. Base + match ratio (for pattern insights) ──
+    // ── 8. Base + match ratio (for pattern insights) ──
     const matchRatio = opts.matchRatio ?? 0.5;
     const baseScore = 0.12 + matchRatio * 0.15;
 
-    // ── 8. Dynamic adjustment for existing insights ──
+    // ── 9. Dynamic adjustment for existing insights ──
     let existingInsightBonus = 0;
     if (opts.insight) {
       existingInsightBonus = this._calculateExistingInsightBonus(opts.insight, signals);
     }
 
     const raw = baseScore + countScore + totalConsistencyScore + crossValidationScore +
-                enhancedTemporalScore + qualityScore + diversityScore + freshnessScore + existingInsightBonus;
+                enhancedTemporalScore + qualityScore + diversityScore + clusterQualityScore +
+                freshnessScore + existingInsightBonus;
 
     return Math.min(0.98, Math.round(raw * 100) / 100);
   }
@@ -1128,6 +1132,46 @@ export class InsightEngine {
   }
 
   /**
+   * Calculate bonus when multiple consistency dimensions align strongly
+   *
+   * Provides extra confidence when patterns show consistent behavior across
+   * multiple dimensions (temporal + topical + directional + contextual).
+   * Strong alignment across dimensions indicates robust, reliable patterns.
+   */
+  _calculateConsistencyAlignmentBonus(consistencyScores) {
+    const { directional, topical, contextual, temporal } = consistencyScores;
+
+    // Define strong consistency thresholds
+    const STRONG_THRESHOLD = 0.7;
+    const MODERATE_THRESHOLD = 0.5;
+
+    let strongDimensions = 0;
+    let moderateDimensions = 0;
+
+    // Count dimensions with strong/moderate consistency
+    [directional, topical, contextual, temporal].forEach(score => {
+      if (score >= STRONG_THRESHOLD) strongDimensions++;
+      else if (score >= MODERATE_THRESHOLD) moderateDimensions++;
+    });
+
+    let alignmentBonus = 0;
+
+    // Multi-dimensional strong alignment bonuses
+    if (strongDimensions >= 3) alignmentBonus += 0.08; // Triple alignment
+    else if (strongDimensions >= 2) alignmentBonus += 0.05; // Dual alignment
+
+    // Mixed strong/moderate alignment bonuses
+    if (strongDimensions >= 1 && moderateDimensions >= 2) alignmentBonus += 0.03;
+
+    // Temporal consistency multiplier (temporal patterns are especially valuable)
+    if (temporal >= STRONG_THRESHOLD && strongDimensions >= 1) {
+      alignmentBonus *= 1.2; // 20% bonus for strong temporal alignment
+    }
+
+    return Math.min(0.12, alignmentBonus); // Cap alignment bonus at 12%
+  }
+
+  /**
    * Calculate signal quality based on completeness and richness
    */
   _calculateSignalQuality(signals) {
@@ -1183,6 +1227,75 @@ export class InsightEngine {
   }
 
   /**
+   * Calculate signal cluster quality - how well signals group together thematically
+   */
+  _calculateSignalClusterQuality(signals) {
+    if (signals.length <= 1) return 0.5;
+
+    let clusterScore = 0;
+    const topics = signals.map(s => s.topic).filter(Boolean);
+    const contexts = signals.map(s => s.context).filter(Boolean);
+
+    // Topic clustering
+    const topicSimilarity = this._calculateTopicSimilarity(topics);
+    clusterScore += topicSimilarity * 0.6;
+
+    // Context clustering
+    const contextSimilarity = this._calculateContextSimilarity(contexts);
+    clusterScore += contextSimilarity * 0.4;
+
+    return Math.min(1.0, Math.max(0.0, clusterScore));
+  }
+
+  _calculateTopicSimilarity(topics) {
+    if (topics.length <= 1) return 0.5;
+
+    let similaritySum = 0;
+    let comparisons = 0;
+
+    for (let i = 0; i < topics.length - 1; i++) {
+      for (let j = i + 1; j < topics.length; j++) {
+        const similarity = this._calculateStringSimilarity(topics[i], topics[j]);
+        similaritySum += similarity;
+        comparisons++;
+      }
+    }
+
+    return comparisons > 0 ? similaritySum / comparisons : 0;
+  }
+
+  _calculateContextSimilarity(contexts) {
+    if (contexts.length <= 1) return 0.5;
+
+    let similaritySum = 0;
+    let comparisons = 0;
+
+    for (let i = 0; i < contexts.length - 1; i++) {
+      for (let j = i + 1; j < contexts.length; j++) {
+        const similarity = this._calculateStringSimilarity(contexts[i], contexts[j]);
+        similaritySum += similarity;
+        comparisons++;
+      }
+    }
+
+    return comparisons > 0 ? similaritySum / comparisons : 0;
+  }
+
+  _calculateStringSimilarity(str1, str2) {
+    if (!str1 || !str2) return 0;
+
+    const words1 = str1.toLowerCase().split(/\W+/).filter(w => w.length > 2);
+    const words2 = str2.toLowerCase().split(/\W+/).filter(w => w.length > 2);
+
+    if (words1.length === 0 || words2.length === 0) return 0;
+
+    const commonWords = words1.filter(w => words2.includes(w));
+    const maxLength = Math.max(words1.length, words2.length);
+
+    return commonWords.length / maxLength;
+  }
+
+  /**
    * Calculate freshness score - more recent signals contribute more to confidence
    */
   _calculateFreshnessScore(signals) {
@@ -1208,6 +1321,113 @@ export class InsightEngine {
 
     const avgFreshness = freshnessSum / validTimestamps;
     return Math.min(0.08, avgFreshness * 0.08);
+  }
+
+  /**
+   * Calculate signal cluster quality - how well signals group into coherent patterns
+   */
+  _calculateSignalClusterQuality(signals) {
+    if (signals.length < 3) return 0.02;
+
+    let clusterScore = 0;
+
+    // Topic clustering quality
+    const topicClusters = this._analyzeTopicClusters(signals);
+    clusterScore += topicClusters * 0.06;
+
+    // Temporal clustering quality
+    const temporalClusters = this._analyzeTemporalClusters(signals);
+    clusterScore += temporalClusters * 0.04;
+
+    // Cross-dimensional coherence
+    const crossCoherence = this._analyzeCrossDimensionalCoherence(signals);
+    clusterScore += crossCoherence * 0.06;
+
+    return Math.min(0.16, clusterScore);
+  }
+
+  /**
+   * Analyze topic clustering quality
+   */
+  _analyzeTopicClusters(signals) {
+    const topics = signals.map(s => String(s.topic || '').toLowerCase()).filter(Boolean);
+    if (topics.length < 2) return 0;
+
+    let clustered = 0;
+    const visited = new Set();
+
+    for (let i = 0; i < topics.length; i++) {
+      if (visited.has(i)) continue;
+
+      for (let j = i + 1; j < topics.length; j++) {
+        if (visited.has(j)) continue;
+
+        if (this._calculateTopicSimilarity(topics[i], topics[j]) > 0.4) {
+          clustered += 2;
+          visited.add(i);
+          visited.add(j);
+        }
+      }
+    }
+
+    return clustered / topics.length;
+  }
+
+  /**
+   * Analyze temporal clustering quality
+   */
+  _analyzeTemporalClusters(signals) {
+    const timestamped = signals.filter(s => s.timestamp);
+    if (timestamped.length < 2) return 0;
+
+    timestamped.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+
+    let clustered = 0;
+    const CLUSTER_WINDOW = 4 * 60 * 60 * 1000; // 4 hours
+
+    for (let i = 0; i < timestamped.length - 1; i++) {
+      const timeDiff = new Date(timestamped[i+1].timestamp).getTime() -
+                      new Date(timestamped[i].timestamp).getTime();
+      if (timeDiff <= CLUSTER_WINDOW) {
+        clustered++;
+      }
+    }
+
+    return clustered / (timestamped.length - 1);
+  }
+
+  /**
+   * Analyze cross-dimensional coherence
+   */
+  _analyzeCrossDimensionalCoherence(signals) {
+    if (signals.length < 3) return 0;
+
+    let coherentPairs = 0;
+    let totalPairs = 0;
+
+    for (let i = 0; i < signals.length - 1; i++) {
+      for (let j = i + 1; j < signals.length; j++) {
+        const s1 = signals[i];
+        const s2 = signals[j];
+        let coherenceDimensions = 0;
+
+        // Topic coherence
+        if (s1.topic && s2.topic && this._calculateTopicSimilarity(s1.topic, s2.topic) > 0.3) {
+          coherenceDimensions++;
+        }
+
+        // Temporal coherence (within 6 hours)
+        if (s1.timestamp && s2.timestamp) {
+          const timeDiff = Math.abs(new Date(s1.timestamp).getTime() - new Date(s2.timestamp).getTime());
+          if (timeDiff < 6 * 60 * 60 * 1000) coherenceDimensions++;
+        }
+
+        if (coherenceDimensions >= 2) coherentPairs++;
+        totalPairs++;
+      }
+    }
+
+    return totalPairs > 0 ? coherentPairs / totalPairs : 0;
   }
 
   /**
@@ -1359,6 +1579,96 @@ export class InsightEngine {
     }
 
     return foundSignals;
+  }
+
+  /**
+   * Enhanced signal count scoring with progressive thresholds and quality weighting
+   *
+   * Confidence bonuses at key thresholds:
+   * - 3+ signals: validation threshold (basic confidence)
+   * - 5+ signals: pattern threshold (moderate confidence)
+   * - 8+ signals: strong pattern (high confidence)
+   * - 12+ signals: very strong pattern (very high confidence)
+   * - 20+ signals: exceptional pattern (maximum confidence)
+   */
+  _calculateEnhancedSignalCountScore(signals, allSignals = []) {
+    if (!signals || signals.length === 0) return 0.05;
+
+    const count = signals.length;
+
+    // Base logarithmic scaling with enhanced curve
+    let baseScore = Math.min(0.25, Math.log2(count + 1) * 0.06);
+
+    // Progressive threshold bonuses for meaningful confidence levels
+    let thresholdBonus = 0;
+    if (count >= 3) thresholdBonus += 0.06;      // Validation threshold
+    if (count >= 5) thresholdBonus += 0.05;      // Pattern threshold
+    if (count >= 8) thresholdBonus += 0.04;      // Strong pattern
+    if (count >= 12) thresholdBonus += 0.03;     // Very strong pattern
+    if (count >= 20) thresholdBonus += 0.02;     // Exceptional pattern
+
+    // Quality-weighted count adjustment
+    const qualityWeight = this._calculateSignalQualityWeight(signals);
+    const qualityAdjustment = qualityWeight * 0.08;
+
+    // Signal reinforcement with enhanced algorithm
+    const reinforcementScore = this._calculateSignalReinforcement(signals, allSignals);
+
+    // Independent source validation bonus
+    const independentSourceBonus = this._calculateIndependentSourceBonus(signals);
+
+    const totalScore = baseScore + thresholdBonus + qualityAdjustment + reinforcementScore + independentSourceBonus;
+
+    return Math.min(0.50, totalScore); // Cap at 50% to leave room for other factors
+  }
+
+  /**
+   * Calculate quality weight for signals based on completeness and coherence
+   */
+  _calculateSignalQualityWeight(signals) {
+    if (signals.length === 0) return 0;
+
+    let totalWeight = 0;
+    for (const signal of signals) {
+      let weight = 0.3; // Base weight
+
+      // Completeness factors
+      if (signal.topic && signal.topic.length > 10) weight += 0.2;
+      if (signal.context && signal.context.length > 20) weight += 0.2;
+      if (signal.timestamp) weight += 0.1;
+      if (signal.value !== undefined) weight += 0.1;
+      if (signal.type) weight += 0.1;
+
+      totalWeight += Math.min(1.0, weight);
+    }
+
+    return totalWeight / signals.length; // Average quality weight
+  }
+
+  /**
+   * Calculate bonus for signals from independent sources
+   */
+  _calculateIndependentSourceBonus(signals) {
+    const sources = new Set();
+    const types = new Set();
+
+    for (const signal of signals) {
+      if (signal.source) sources.add(signal.source);
+      if (signal.type) types.add(signal.type);
+    }
+
+    let bonus = 0;
+
+    // Bonus for source diversity
+    if (sources.size >= 2) bonus += 0.03;
+    if (sources.size >= 3) bonus += 0.02;
+    if (sources.size >= 4) bonus += 0.02;
+
+    // Bonus for signal type diversity
+    if (types.size >= 2) bonus += 0.02;
+    if (types.size >= 3) bonus += 0.01;
+
+    return Math.min(0.10, bonus);
   }
 
   /**

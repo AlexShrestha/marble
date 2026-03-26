@@ -8,7 +8,7 @@ import {
   toKGInsights,
   listTemplates,
   estimateAgeFromContext,
-} from './archetype-generator.js';
+} from '../core/archetype-generator.js';
 
 let passed = 0;
 let failed = 0;

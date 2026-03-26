@@ -3,8 +3,8 @@
  * test-relationship-simulator.js — Tests for Marble Relationship Simulation Engine
  */
 
-import { RelationshipSimulator } from './relationship-simulator.js';
-import { MarbleKG } from './kg.js';
+import { RelationshipSimulator } from '../core/relationship-simulator.js';
+import { KnowledgeGraph } from '../core/kg.js';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
@@ -17,12 +17,12 @@ function assert(condition, msg) {
   else { failed++; console.error(`  ✗ ${msg}`); }
 }
 
-function createTestKG() {
+async function createTestKG() {
   const tmpPath = path.join(os.tmpdir(), `test-relsim-${Date.now()}.json`);
-  const kg = new MarbleKG(tmpPath).load();
+  const kg = await new KnowledgeGraph(tmpPath).load();
 
   // Seed with user interests
-  kg.data.user.interests = [
+  kg.user.interests = [
     { topic: 'fitness', weight: 0.8, last_boost: new Date().toISOString(), trend: 'stable' },
     { topic: 'hiking', weight: 0.7, last_boost: new Date().toISOString(), trend: 'rising' },
     { topic: 'startup', weight: 0.9, last_boost: new Date().toISOString(), trend: 'stable' },
@@ -77,7 +77,7 @@ function testAddRelationship() {
   assert(rel.relationship_type === 'parent-child', 'relationship_type is set');
   assert(rel.person_b_profile.age === 5, 'person_b_profile preserved');
   assert(rel.shared_interests !== undefined, 'shared_interests computed');
-  assert(kg.data.user.relationships.length === 1, 'Relationship stored in KG');
+  assert(kg.user.relationships.length === 1, 'Relationship stored in KG');
 
   cleanup(tmpPath);
 }
@@ -170,10 +170,10 @@ function testTemporalContext() {
   cleanup(tmpPath);
 }
 
-// ─── Test: VIVO Recommendations ──────────────────────────────────────
+// ─── Test: Content Recommendations ──────────────────────────────────────
 
 function testVivoRecommendations() {
-  console.log('\n--- Test: VIVO Recommendations');
+  console.log('\n--- Test: Content Recommendations');
   const { kg, tmpPath } = createTestKG();
   const sim = new RelationshipSimulator(kg);
 
@@ -193,7 +193,7 @@ function testVivoRecommendations() {
 
   const recs = sim.getVivoRecommendations({ date: new Date('2026-07-15'), limit: 5 });
 
-  assert(recs.length > 0, `Has VIVO recommendations (${recs.length})`);
+  assert(recs.length > 0, `Has Content recommendations (${recs.length})`);
   assert(recs.length <= 5, 'Respects limit');
   assert(recs[0].relationship !== undefined, 'Recommendation has relationship context');
   assert(recs[0].confidence !== undefined, 'Recommendation has confidence');

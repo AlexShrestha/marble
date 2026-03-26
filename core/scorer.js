@@ -35,7 +35,7 @@ export class Scorer {
     this.swarmInstance = config.swarmInstance || null; // Optional swarm for enhanced reasoning
 
     // Backward compatibility
-    this.legacyMode = config.legacyMode !== false; // Default to true for VIVO compatibility
+    this.legacyMode = config.legacyMode !== false; // Default to true for legacy system compatibility
     this.weights = this; // Expose weights interface for calibration
   }
 
@@ -175,7 +175,7 @@ export class Scorer {
     // Use dynamic weights or legacy weights
     let raw;
     if (this.legacyMode) {
-      // Backward compatibility: use fixed SCORE_WEIGHTS for VIVO
+      // Backward compatibility: use fixed SCORE_WEIGHTS for legacy system
       raw = (
         interest * SCORE_WEIGHTS.interest_match +
         temporal * SCORE_WEIGHTS.temporal_relevance +

@@ -25,7 +25,7 @@ const USER_PROFILE = {
     { topic: 'ecommerce', weight: 0.7, last_boost: new Date(Date.now() - 259200000).toISOString(), trend: 'stable' },
   ],
   context: {
-    active_projects: ['AhaRoll', 'SuperstateX', 'VIVO', 'Prism'],
+    active_projects: ['AhaRoll', 'SuperstateX', 'ContentApp', 'Prism'],
     calendar: ['Team standup 10:00', 'Investor call 14:00', 'Gym 18:00'],
     recent_conversations: ['video pipeline GPU', 'Shopify app review', 'knowledge graph'],
     mood_signal: 'high energy'

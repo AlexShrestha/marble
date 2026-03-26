@@ -28,7 +28,7 @@ export const USE_CASE_CONFIGS = {
       actionability: 0.15,
       source_trust: 0.10
     },
-    description: 'VIVO content curation (backward compatible)'
+    description: 'Legacy content curation (backward compatible)'
   },
   email_campaign: {
     useCase: 'email_campaign',

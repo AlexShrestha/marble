@@ -1,5 +1,5 @@
 /**
- * Marble type definitions
+ * Prism type definitions
  */
 
 /**

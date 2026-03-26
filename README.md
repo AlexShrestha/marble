@@ -12,11 +12,96 @@ Marble creates multiple simulated versions of a user, tests them against real-wo
 
 ## Why Marble?
 
-Most curation works **outside-in** — "what does the crowd think?"
+**Marble is NOT collaborative filtering.** Here's why that matters:
 
-Marble works **person-first** — "test different versions of this person, see which fits best."
+### Works from User One
+- **Collaborative filtering:** Needs thousands of similar users to make predictions
+- **Marble:** Creates multiple synthetic versions of YOU, tests them against real signals, evolves the best-predicting clone daily
 
-The world already votes on what matters (trending topics, viral posts, funding rounds). Marble synthesizes those signals with a deep model of the user to surface content that feels like: *"How did it know I needed to see this today?"*
+### Predicts Business Context, Not Just Preferences
+- **CF:** "Users like you enjoyed this AI article"
+- **Marble:** "This AI safety piece addresses your CTO's concerns for today's 2pm investor meeting"
+
+### Explains the WHY
+- **CF:** Similarity scores and "people also liked"
+- **Marble:** Hypothesis-driven insights with confidence scores — "Why this matters to your specific goals right now"
+
+### Synthesizes Missing Intelligence
+- **CF:** Limited to existing user behavior patterns
+- **Marble:** Generates insights about relationships, timing, and stakeholder concerns you never explicitly provided
+
+### Models Your Network
+- **CF:** Treats you as an isolated individual
+- **Marble:** Understands the people who influence your decisions and tailors recommendations for multi-party dynamics
+
+**The result:** Content that feels like *"How did it know I needed to see this today?"* instead of *"Other people liked this too."*
+
+## Marble vs. The Competition
+
+| Capability | **Marble** | Segment | Amplitude | CF Systems (Netflix, Spotify) |
+|------------|------------|---------|-----------|-------------------------------|
+| **Day-one intelligence** | ✅ Synthetic clones work immediately | ❌ Needs behavior data | ❌ Needs event tracking | ❌ Needs thousands of similar users |
+| **Temporal awareness** | ✅ Calendar, deadlines, project phases | ❌ Static segments | ❌ Historical analysis only | ❌ Time-blind recommendations |
+| **Relationship modeling** | ✅ Stakeholder concerns, decision dynamics | ❌ Individual traits only | ❌ User-level only | ❌ Individual preferences only |
+| **Business outcome focus** | ✅ Optimizes for your KPIs | 🟡 Engagement analytics | 🟡 Product metrics | ❌ Platform engagement only |
+| **Predictive reasoning** | ✅ "Why this will help your meeting" | ❌ Descriptive only | 🟡 What happened | ❌ "People also liked" |
+| **Privacy-first** | ✅ Runs locally, no data upload | ❌ Cloud-dependent | ❌ Cloud-dependent | ❌ Platform data collection |
+
+### What Marble Can Do That CF Cannot
+
+**Scenario 1: Pre-Meeting Intelligence**
+- **CF Result:** "AI articles you might like"
+- **Marble Result:** "AI safety regulatory timeline — addresses your CTO's security concerns for today's 2pm funding call"
+
+**Scenario 2: Stakeholder Alignment**
+- **CF Result:** Recommends based on your past clicks
+- **Marble Result:** Surfaces technical validation stories because it knows your skeptical CTO influences purchasing decisions
+
+**Scenario 3: Project Timing**
+- **CF Result:** Consistent recommendations regardless of context
+- **Marble Result:** Prioritizes launch-relevant content when you're 2 weeks from product release
+
+**Scenario 4: Zero Data Cold Start**
+- **CF Result:** Random popular content until enough behavior accumulates
+- **Marble Result:** Immediate personalization through synthetic clone evolution
+
+## Technical Architecture: Why This Isn't Just Better CF
+
+### CF: Static User-Item Matrix
+```javascript
+// Traditional approach
+const userItemMatrix = {
+  user123: { "article_1": 0.8, "article_2": 0.6 }
+};
+// Predict based on similar users' ratings
+```
+
+### Marble: Dynamic Context-Aware Knowledge Graph
+```javascript
+// Marble approach
+const contextGraph = {
+  interests: { ai: 0.8, startups: 0.6 },
+  calendar: [{ event: "investor_pitch", time: "today 2pm" }],
+  relationships: {
+    skeptical_cto: { concerns: ["security"], influence: 0.9 }
+  },
+  activeProjects: [{ name: "product_launch", deadline: "2026-04-15" }]
+};
+// Predict based on business context + psychology
+```
+
+### 7-Dimensional Scoring vs. Similarity Matching
+```javascript
+// CF: Single similarity score
+score = cosineSimilarity(userPrefs, itemFeatures);
+
+// Marble: Multi-dimensional business intelligence
+magic_score = interest(0.25) + temporal(0.30) + novelty(0.20)
+            + actionability(0.15) + source_trust(0.10)
+            × freshness_decay × stakeholder_alignment;
+```
+
+**Why competitors can't easily copy this:** Requires rebuilding recommendation infrastructure from scratch—context graphs, business metric optimization, relationship modeling, and temporal intelligence. Not a feature add to existing systems.
 
 ## Quick Start
 
@@ -53,8 +138,8 @@ await marble.signal('story-456', 'dwell', { duration: 45000 });
 **Run tests:**
 
 ```bash
-git clone https://github.com/AlexShrestha/marble.git
-cd marble && npm install && npm test
+git clone https://github.com/AlexShrestha/prism.git
+cd prism && npm install && npm test
 ```
 
 ## Features
@@ -252,6 +337,7 @@ console.log(`PMF Score: ${pmf.pmf_score}/1.0`);
 | [Architecture](docs/architecture.md) | Full system design, data flow, component interactions |
 | [API Reference](docs/api-reference.md) | Every endpoint and function with examples |
 | [Usage Examples](docs/usage-examples.md) | Real code showing how to integrate Marble |
+| [Competitive Positioning](docs/competitive-positioning.md) | Why Marble isn't just "better collaborative filtering" |
 | [Insight-Driven KG](docs/insight-kg.md) | How Marble reasons about WHY, not just WHAT |
 | [Archetypes & Relationships](docs/archetypes-relationships.md) | Relationship simulation, archetype generation |
 | [Contributing](docs/contributing.md) | How to contribute to Marble |

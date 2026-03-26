@@ -8,7 +8,7 @@
  * 2. Auto-tuning weights via calibration API
  * 3. Clone fitness evolution against real metrics
  * 4. Primary + secondary metrics support
- * 5. Backward compatibility with current VIVO scoring
+ * 5. Backward compatibility with existing scoring systems
  */
 
 import { Scorer } from '../core/scorer.js';
@@ -62,8 +62,8 @@ async function testMetricAgnosticScorer() {
   const kg = new MockKG();
 
   try {
-    // Test 1: Backward compatibility (VIVO mode)
-    console.log('1️⃣  Testing Backward Compatibility (VIVO Mode)');
+    // Test 1: Backward compatibility (Legacy mode)
+    console.log('1️⃣  Testing Backward Compatibility (Legacy Mode)');
     const legacyScorer = new Scorer(kg, { legacyMode: true });
 
     const testStory = {
@@ -240,7 +240,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
         console.log('   ✅ Primary + secondary metrics support');
         console.log('   ✅ Multiple use case configurations');
         console.log('   ✅ Custom metric registration');
-        console.log('   ✅ Backward compatibility with VIVO scoring');
+        console.log('   ✅ Backward compatibility with Legacy scoring');
         console.log('   ✅ Export/import configuration support');
         process.exit(0);
       } else {

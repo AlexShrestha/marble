@@ -2,7 +2,7 @@
  * Tests for Synthetic Reasoner — Marble Layer 2 inference
  */
 
-import { SyntheticReasoner, categorizeInsight, REASONING_RULES } from './synthetic-reasoner.js';
+import { SyntheticReasoner, categorizeInsight, REASONING_RULES } from '../core/synthetic-reasoner.js';
 
 let passed = 0;
 let failed = 0;

@@ -1,5 +1,5 @@
 /**
- * Marble Arc Reranker
+ * Prism Arc Reranker
  *
  * Takes the top-scored stories and sequences them into a narrative arc.
  * The 10 stories should flow — not just be ranked by score.

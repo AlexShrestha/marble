@@ -14,7 +14,7 @@
  *   shared_interests, tension_points, recommendations }
  */
 
-import { MarbleKG } from './kg.js';
+import { KnowledgeGraph } from './kg.js';
 
 // ─── TEMPORAL CONTEXTS ──────────────────────────────────────────────────────
 // Seasonal/temporal patterns that affect relationship-based recommendations
@@ -208,7 +208,7 @@ export class RelationshipSimulator {
   }
 
   /**
-   * Get VIVO-ready recommendations: formatted for story/product selection.
+   * Get content-ready recommendations: formatted for story/product selection.
    * Returns recommendations tagged with relationship context for the
    * editorial pipeline.
    *

@@ -183,12 +183,12 @@ The simulator understands time contexts:
 | Back-to-school | Aug-Sep | School supplies, routine tips |
 | Evening | After 7pm | Couple content, personal growth |
 
-### VIVO Integration
+### Content Platform Integration
 
 Relationships feed directly into content recommendations:
 
 ```javascript
-const recommendations = sim.getVivoRecommendations({
+const recommendations = sim.getContentRecommendations({
   limit: 5,
   includeRelationshipContext: true
 });

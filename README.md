@@ -1,5 +1,10 @@
 # Marble
 
+[![CI](https://github.com/AlexShrestha/marble/workflows/CI/badge.svg)](https://github.com/AlexShrestha/marble/actions/workflows/ci.yml)
+[![npm version](https://img.shields.io/badge/npm-0.1.0-blue)](https://npmjs.com/package/marblism)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Node.js 18+](https://img.shields.io/badge/node-18+-brightgreen)](https://nodejs.org/)
+
 **Hyper-personalized content curation through person synthesis and simulation.**
 
 ```javascript

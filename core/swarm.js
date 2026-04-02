@@ -372,6 +372,30 @@ export class Swarm {
 
 export { Clone, SwarmAgent, AGENT_LENSES };
 
+/**
+ * Synchronous single-story scorer — runs all agent lenses and returns weighted consensus.
+ * @param {Object} story
+ * @param {Object} kg - Knowledge graph / user clone
+ * @returns {{ score: number, agentScores: Object }}
+ */
+export function swarmScore(story, kg) {
+  const clone = new Clone(kg);
+  clone.takeSnapshot();
+  const agents = Object.entries(AGENT_LENSES).map(([, lens]) => new SwarmAgent(lens, clone));
+  const agentScores = {};
+  let weighted = 0;
+  let totalWeight = 0;
+  for (const agent of agents) {
+    agent.evaluate([story]);
+    const s = agent.picks[0]?.score ?? 0;
+    const w = agent.lens.weight ?? 1;
+    agentScores[agent.lens.name ?? agent.lens.role] = s;
+    weighted += s * w;
+    totalWeight += w;
+  }
+  return { score: totalWeight > 0 ? weighted / totalWeight : 0, agentScores };
+}
+
 // ── Dynamic Weights ──────────────────────────────────────────────────────────
 
 /**

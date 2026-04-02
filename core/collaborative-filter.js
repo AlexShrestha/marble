@@ -399,6 +399,29 @@ export class CollaborativeFilter {
   /**
    * Get interaction statistics for debugging/monitoring
    */
+  async getRecommendations(userId, kg, limit = 20) {
+    const similarUsers = await this.findSimilarUsers(userId);
+    if (similarUsers.length === 0) return [];
+
+    const seen = new Set(this.interactions.get(userId)?.keys() || []);
+    const scores = new Map();
+
+    for (const { userId: otherId, similarity } of similarUsers) {
+      const otherInteractions = this.interactions.get(otherId);
+      if (!otherInteractions) continue;
+      for (const [contentId, interaction] of otherInteractions) {
+        if (seen.has(contentId)) continue;
+        const current = scores.get(contentId) || 0;
+        scores.set(contentId, current + similarity * interaction.implicit_score);
+      }
+    }
+
+    return Array.from(scores.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, limit)
+      .map(([contentId, score]) => ({ contentId, score }));
+  }
+
   getStats() {
     return {
       total_users: this.userProfiles.size,
@@ -434,3 +457,5 @@ export class CollaborativeFilter {
     return matrix;
   }
 }
+
+export const globalCollaborativeFilter = new CollaborativeFilter();

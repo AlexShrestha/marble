@@ -734,19 +734,32 @@ function _buildSpecScorer(spec) {
     // ── Structured field matching (critical for sparse content like movies) ──
     const storyGenres = _normalizeGenres(story);
 
-    // Interest anchors against story genres — genre is the primary signal for movies
+    // Interest anchors: check against genres AND full text (LLM specs use phrases, not just genre labels)
     const anchors = [
       ...(spec.interest_anchors || []),
       ...(spec.interest_topics || []),
-      ...(spec.positive_signals || []),
     ].map(a => a.toLowerCase());
 
     for (const anchor of anchors) {
-      if (storyGenres.includes(anchor)) {
+      if (storyGenres.includes(anchor) || text.includes(anchor)) {
         score += 0.25;
-        reasons.push(`[${spec.name}] genre match: "${anchor}"`);
+        reasons.push(`[${spec.name}] anchor match: "${anchor}"`);
         break;
       }
+    }
+
+    // Positive signals: LLM generates full sentences — extract meaningful keywords (>3 chars)
+    // and check if any appear in text. This bridges LLM spec format to keyword scoring.
+    const posSignalKeywords = (spec.positive_signals || [])
+      .flatMap(s => s.toLowerCase().split(/[\s,.()/]+/).filter(w => w.length > 3));
+    let posHits = 0;
+    for (const kw of posSignalKeywords) {
+      if (text.includes(kw)) posHits++;
+    }
+    if (posSignalKeywords.length > 0 && posHits > 0) {
+      const posScore = Math.min(0.35, 0.1 * posHits);
+      score += posScore;
+      reasons.push(`[${spec.name}] signal keywords matched: ${posHits}/${posSignalKeywords.length}`);
     }
 
     // Story year / recency signal

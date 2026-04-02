@@ -572,45 +572,105 @@ function _buildSpecScorer(spec) {
 
 async function _generateFleetFromLLM(domain, contentSample, kgSummary, llm) {
   const client = llm || new Anthropic();
-  const prompt = `You are designing a fleet of 5 scoring agents for Marble, a personalized content ranking system.
 
-Domain: ${domain}
-Content sample: ${(contentSample || '').slice(0, 400)}
-User KG summary: ${JSON.stringify(kgSummary || {}, null, 0).slice(0, 800)}
+  // Compact KG representation: pull what matters for motivation inference
+  const kg = kgSummary || {};
+  const interests = (kg.interests || []).slice(0, 15).map(i =>
+    typeof i === 'string' ? i : `${i.topic || i.name}${i.trend ? ` (${i.trend})` : ''}`
+  );
+  const avoidPatterns = (kg.avoidPatterns || kg.avoid_patterns || []).slice(0, 8);
+  const role = kg.role || kg.identity?.role || '';
+  const recentEngagement = (kg.recentEngagement || kg.recent_engagement || []).slice(0, 8);
+  const history = (kg.history || []).slice(-10).map(h => h.title || h.topic || h);
 
-Generate exactly 5 agent specs as a JSON array, tailored to this domain and user profile.
-Each spec must have:
-- name (string, unique, snake_case)
-- description (string, one sentence)
-- weight (number 0-1, all 5 must sum to 1.0)
-- boost_keywords (string[], 3-8 keywords that raise score)
-- penalty_keywords (string[], 2-4 keywords that lower score)
-- domain_signals (object: domain name → string[] of platform-specific signals)
-- insight_keywords (string[], derived from user KG)
-- interest_topics (string[], topic names from user interests)
+  const kgStr = JSON.stringify({ role, interests, avoidPatterns, recentEngagement, history }, null, 0).slice(0, 900);
 
-Return ONLY the JSON array, no commentary. Example weights: [0.25, 0.25, 0.20, 0.15, 0.15]`;
+  const prompt = `You are designing a personalized scoring agent fleet for Marble.
+
+STEP 1 — Infer consumption motivation.
+Look at this user's profile and domain. Why does this user consume "${domain}" content?
+Consider: leisure/escape, nostalgia, career relevance, education, social/shared experience, creative inspiration, etc.
+The answer should be specific to THIS user's actual pattern, not a generic assumption.
+
+STEP 2 — Design 5 agents, each probing one dimension of that motivation.
+Each agent asks: "Does this content satisfy THIS specific aspect of why this user consumes this type of content?"
+Agents must be grounded in the user's actual history and interests — not generic professional lenses.
+
+User profile:
+${kgStr}
+
+Content domain: ${domain}
+Content sample: ${(contentSample || '').slice(0, 300)}
+
+Return ONLY a JSON object:
+{
+  "inferred_motivation": "one sentence — why this user consumes this content type",
+  "motivation_signals": ["evidence from KG that supports this", ...],
+  "agents": [
+    {
+      "name": "snake_case_agent_name",
+      "motivation_frame": "one sentence — what satisfaction dimension this agent probes for this user",
+      "screening_question": "the single most predictive yes/no question this agent asks",
+      "weight": 0.0-1.0,
+      "positive_signals": ["what yes looks like in content for this specific user", ...],
+      "negative_signals": ["what would fail this agent's test for this user", ...],
+      "interest_anchors": ["specific user interests/topics this agent is sensitive to", ...]
+    },
+    ...
+  ]
+}
+
+Rules:
+- All agent weights must sum to 1.0
+- Agent names must NOT be: career, growth, timing, contrarian, serendipity (those are generic professional lenses)
+- Each agent must be meaningfully different from the others
+- screening_question must be specific enough that two similar items could get different answers`;
 
   const response = await client.messages.create({
     model: 'claude-opus-4-6',
-    max_tokens: 1200,
+    max_tokens: 1600,
     messages: [{ role: 'user', content: prompt }]
   });
 
   const raw = response.content[0]?.type === 'text' ? response.content[0].text : '';
-  const jsonMatch = raw.match(/\[[\s\S]*\]/);
-  if (!jsonMatch) throw new Error('No JSON array found in LLM response');
-  const specs = JSON.parse(jsonMatch[0]);
-  if (!Array.isArray(specs) || specs.length === 0) throw new Error('Invalid specs array');
-  return specs;
+  const jsonMatch = raw.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) throw new Error('No JSON object found in LLM response');
+  const parsed = JSON.parse(jsonMatch[0]);
+  if (!Array.isArray(parsed.agents) || parsed.agents.length === 0) throw new Error('Invalid agents array');
+
+  // Attach inferred motivation metadata to each agent spec for use by explodeAgentQuestions
+  const motivation = parsed.inferred_motivation || '';
+  return parsed.agents.map(a => ({ ...a, inferred_motivation: motivation }));
 }
 
+// Domain-appropriate static fallback frames — NOT generic professional lenses
+const _STATIC_FLEET_FRAMES = {
+  movies: [
+    { name: 'genre_resonance',    motivation_frame: 'Does this match the genres and tones this user consistently enjoys?',            weight: 0.30 },
+    { name: 'emotional_depth',    motivation_frame: 'Does this offer the emotional weight and complexity this user seeks?',            weight: 0.25 },
+    { name: 'era_and_style',      motivation_frame: 'Does the era, visual style, or pacing match this user\'s aesthetic preferences?', weight: 0.20 },
+    { name: 'avoidance_check',    motivation_frame: 'Does this avoid the genres or patterns this user consistently dislikes?',         weight: 0.15 },
+    { name: 'thematic_alignment', motivation_frame: 'Do the themes align with subjects this user finds meaningful or engaging?',       weight: 0.10 },
+  ],
+  default: [
+    { name: 'interest_fit',       motivation_frame: 'Does this directly match topics this user has expressed strong interest in?',     weight: 0.30 },
+    { name: 'depth_match',        motivation_frame: 'Does this match the depth and complexity level this user prefers?',               weight: 0.25 },
+    { name: 'pattern_alignment',  motivation_frame: 'Does this fit the consumption patterns visible in this user\'s history?',         weight: 0.25 },
+    { name: 'avoidance_check',    motivation_frame: 'Does this avoid topics or styles this user consistently disengages from?',        weight: 0.20 },
+  ],
+};
+
 function _buildStaticFleet(domain) {
-  const specs = Object.entries(AGENT_LENSES).map(([name, lens]) => ({
-    name,
-    weight: lens.weight,
+  const domainKey = domain?.toLowerCase();
+  const frames = _STATIC_FLEET_FRAMES[domainKey] || _STATIC_FLEET_FRAMES.default;
+
+  const specs = frames.map(frame => ({
+    name: frame.name,
+    weight: frame.weight,
+    motivation_frame: frame.motivation_frame,
+    screening_question: frame.motivation_frame, // reuse as question in fallback
     scoreFn: _buildSpecScorer({
-      name,
+      name: frame.name,
       boost_keywords: [],
       penalty_keywords: [],
       domain_signals: {},
@@ -732,36 +792,61 @@ export async function explodeAgentQuestions(agent, contentSample, kgSummary, llm
   const n = opts.n || 5;
   const client = llm || new Anthropic();
 
-  const agentSpec = typeof agent === 'string' ? { name: agent, description: `${agent} lens` } : agent;
+  const agentSpec = typeof agent === 'string' ? { name: agent, motivation_frame: `${agent} lens` } : agent;
   const agentName = agentSpec.name || 'unknown';
-  const agentDesc = agentSpec.description || agentSpec.name || '';
-  const boostKw = (agentSpec.boost_keywords || []).join(', ');
-  const insightKw = (agentSpec.insight_keywords || []).join(', ');
+  const motivationFrame = agentSpec.motivation_frame || agentSpec.description || agentSpec.name || '';
+  const screeningQuestion = agentSpec.screening_question || motivationFrame;
+  const positiveSignals = (agentSpec.positive_signals || agentSpec.boost_keywords || []).slice(0, 6).join(', ');
+  const negativeSignals = (agentSpec.negative_signals || agentSpec.penalty_keywords || []).slice(0, 4).join(', ');
+  const interestAnchors = (agentSpec.interest_anchors || agentSpec.interest_topics || []).slice(0, 8).join(', ');
+  const inferredMotivation = agentSpec.inferred_motivation || '';
 
-  const prompt = `You are the "${agentName}" scoring agent in Marble, a personalized content ranking system.
+  // Compact user profile for question generation
+  const kg = kgSummary || {};
+  const topInterests = (kg.interests || []).slice(0, 10).map(i =>
+    typeof i === 'string' ? i : `${i.topic || i.name}${i.trend ? ` (${i.trend})` : ''}`
+  ).join(', ');
+  const avoidPatterns = (kg.avoidPatterns || kg.avoid_patterns || []).slice(0, 6).join(', ');
+  const likedHistory = (kg.history || []).filter(h => h.reaction === 'liked' || h.score > 0.7).slice(-5).map(h => h.title || h.topic || h).join(', ');
+  const dislikedHistory = (kg.history || []).filter(h => h.reaction === 'disliked' || h.score < 0.3).slice(-5).map(h => h.title || h.topic || h).join(', ');
 
-Agent description: ${agentDesc}
-${boostKw ? `Boost keywords: ${boostKw}` : ''}
-${insightKw ? `User KG insights: ${insightKw}` : ''}
-User KG summary: ${JSON.stringify(kgSummary || {}, null, 0).slice(0, 600)}
+  const prompt = `You are the "${agentName}" evaluation agent in Marble, a personalized content ranking system.
 
-Content to evaluate:
-${(contentSample || '').slice(0, 600)}
+Your motivation frame: ${motivationFrame}
+Your core screening question: ${screeningQuestion}
+${inferredMotivation ? `Why this user consumes this content type: ${inferredMotivation}` : ''}
 
-Generate exactly ${n} yes/no evaluation questions that this agent would ask about this content.
-For each, evaluate whether it fires (true/false) based on the content, and provide confidence (0.0-1.0).
+This user's taste profile:
+${topInterests ? `- Strong interests: ${topInterests}` : ''}
+${interestAnchors ? `- Topics most relevant to your lens: ${interestAnchors}` : ''}
+${likedHistory ? `- Examples of content they've enjoyed: ${likedHistory}` : ''}
+${dislikedHistory ? `- Examples of content they've disliked: ${dislikedHistory}` : ''}
+${avoidPatterns ? `- Patterns they avoid: ${avoidPatterns}` : ''}
+${positiveSignals ? `- Signals that indicate a strong match for your lens: ${positiveSignals}` : ''}
+${negativeSignals ? `- Signals that indicate a poor match for your lens: ${negativeSignals}` : ''}
 
-Return a JSON array only, no commentary:
+Content being evaluated:
+${(contentSample || '').slice(0, 700)}
+
+Generate exactly ${n} yes/no questions that probe whether this content satisfies your lens for THIS specific user.
+
+Requirements:
+- Each question must be answerable from the content text alone
+- Questions must be deep enough to distinguish between superficially similar items
+- A "yes" must meaningfully predict that THIS user would be satisfied — not just that the content is generically good
+- Questions must be grounded in the user's actual taste (their specific interests, history, avoidances)
+- Do NOT ask generic questions like "Is this relevant?", "Does this expand thinking?", or "Is this well-made?"
+- Each question should be specific enough that two similar items could get different answers
+
+For each question, evaluate it against the content and provide:
+- fired: true if the content satisfies this question, false if not
+- confidence: 0.0–1.0 certainty about the fired value (based on evidence in the content)
+
+Return ONLY a JSON array, no commentary:
 [
   { "question": "...", "fired": true/false, "confidence": 0.0-1.0 },
   ...
-]
-
-Guidelines:
-- Questions must be specific to the "${agentName}" lens (not generic)
-- fired=true means the content satisfies this question
-- confidence reflects certainty about the fired value
-- Unfired questions should have low confidence (0.1-0.3)`;
+]`;
 
   let questions = [];
   let source = 'llm';

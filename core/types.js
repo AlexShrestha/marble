@@ -385,6 +385,19 @@ export const CALIBRATION_STATUS = {
 };
 
 // Metric-agnostic use case configurations (extended)
+/**
+ * @typedef {Object} UserClone
+ * @property {string} id
+ * @property {string} hypothesis - What unknown preference dimension this clone probes
+ * @property {number} confidence - 0–1, updated via Bayesian feedback
+ * @property {Array<{contentId:string, predicted:number, actual:number}>} evaluations
+ * @property {string|null} spawnedFrom - parent clone id if bred from a strong clone
+ * @property {number} generation
+ * @property {number} createdAt
+ * @property {number} lastScoredAt
+ * @property {'active'|'killed'} status
+ */
+
 export const EXTENDED_USE_CASE_CONFIGS = {
   ...USE_CASE_CONFIGS,
   ecommerce: {

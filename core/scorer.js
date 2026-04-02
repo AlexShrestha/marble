@@ -8,7 +8,7 @@
 import { SCORE_WEIGHTS, MetricConfiguration, USE_CASE_CONFIGS } from './types.js';
 import { embeddings } from './embeddings.js';
 import { MetricDrivenScoringEngine } from './enterprise/metric-driven-scoring-engine.js';
-import { swarmScore } from './swarm.js';
+import { swarmScore, generateAgentFleet } from './swarm.js';
 import { globalCollaborativeFilter } from './collaborative-filter.js';
 import { extractEntityAttributes, attributeCount } from './entity-extractor.js';
 import { getWorldContextFromCache } from './worldsim-bridge.js';
@@ -1040,9 +1040,29 @@ export class Scorer {
   async #scoreWithSwarm(stories) {
     const swarmed = [];
 
+    // Build dynamic agent fleet once for the batch (domain from first story)
+    let fleet = null;
+    try {
+      const sample = stories[0];
+      const contentSample = `${sample?.title || ''} ${sample?.summary || ''}`.trim();
+      const domain = sample?.domain || 'unknown';
+      const kgUser = this.kg?.user || {};
+      const kgSummary = {
+        interests: kgUser.interests || [],
+        history: (kgUser.history || []).slice(-20),
+        avoidPatterns: kgUser.avoid_patterns || kgUser.avoidPatterns || [],
+      };
+      const activeClones = typeof this.kg?.getActiveClones === 'function'
+        ? this.kg.getActiveClones()
+        : (kgUser.clones || []).filter(c => c.status === 'active');
+      fleet = await generateAgentFleet(domain, contentSample, kgSummary, null, activeClones.length ? activeClones : null);
+    } catch (err) {
+      console.warn('[Scorer] Fleet generation failed, falling back to static frames:', err.message);
+    }
+
     for (const story of stories) {
       try {
-        const swarmResult = swarmScore(story, this.kg);
+        const swarmResult = swarmScore(story, this.kg, { fleet });
 
         // Convert swarm score to format compatible with existing scorer
         const legacyScores = await this.#computeLegacyScores(story);

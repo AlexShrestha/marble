@@ -20,8 +20,8 @@ Marble creates multiple simulated versions of a user, tests them against real-wo
 ### Works from User One
 Creates multiple synthetic versions of a user, tests them against real signals, and evolves the best-predicting clone daily — no large user base required.
 
-### Predicts Business Context
-"This AI safety piece addresses your CTO's concerns for today's 2pm investor meeting" — not just topic matching, but timing and stakeholder awareness.
+### Predicts from Day Zero
+Creates personalized recommendations within hours of signup—from just 3 interactions, Marble synthesizes preferences across timing, context, and novelty without waiting for behavioral patterns.
 
 ### Explains the WHY
 Hypothesis-driven insights with confidence scores — "Why this matters to your specific goals right now."
@@ -49,14 +49,14 @@ Understands the people who influence your decisions and tailors recommendations 
 
 ### Real-World Scenarios
 
-**Pre-Meeting Intelligence**
-"AI safety regulatory timeline — addresses your CTO's security concerns for today's 2pm funding call"
+**Day-Zero Personalization**
+New user signs up, visits 3 stories on AI safety and startup hiring. Marble generates a clone, tests it against the stories they engaged with, surfaces "Engineering culture during scaling" before they ask for it.
 
-**Stakeholder Alignment**
-Surfaces technical validation stories because it knows your skeptical CTO influences purchasing decisions.
+**Implicit Preference Learning**
+No rating buttons. Marble reads dwell time (45 sec on AI policy piece), skip pattern (2 sec on crypto), and detects emerging interests—then predicts what's relevant tomorrow based on what resonates today.
 
-**Project Timing**
-Prioritizes launch-relevant content when you're 2 weeks from product release.
+**Temporal & Context Evolution**
+Continuously refines predictions by moment—morning check: growth strategies, afternoon: customer success challenges, as context shifts.
 
 **Zero Data Cold Start**
 Immediate personalization through synthetic clone evolution — no waiting for behavior data.

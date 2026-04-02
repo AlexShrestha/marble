@@ -57,15 +57,15 @@ const recommendation = {
 };
 ```
 
-### Marble: "This addresses your 2pm investor meeting"
+### Marble: "This emerged from your first 3 interactions"
 ```javascript
 const recommendation = {
-  item: "AI Safety Regulatory Timeline Q1 2026",
-  magic_score: 0.92,
-  reasoning: "CTO concerns about AI safety + regulatory timeline aligns with funding discussion",
-  temporal_relevance: 0.95, // Meeting in 2 hours
-  stakeholder_alignment: 0.88, // Addresses CTO concerns
-  actionability: 0.84 // Can use in presentation
+  item: "Engineering Culture During Scaling",
+  magic_score: 0.91,
+  reasoning: "User engaged 45s on 'AI safety hiring', skipped crypto pieces, dwelled on 'startup growth'—clone synthesizes hiring + scale pattern",
+  temporal_relevance: 0.90, // Morning context shift detected
+  novelty_factor: 0.82, // Emergent interest, not explicit signal
+  actionability: 0.87 // Directly applicable to current role
 };
 ```
 
@@ -80,23 +80,24 @@ const userModel = {
 };
 ```
 
-**Marble Innovation:** Relationship-aware predictions
+**Marble Innovation:** Zero-day belief contradiction modeling
 ```javascript
-// Marble models decision networks
-const stakeholderModel = {
+// Marble synthesizes contradictions in minimal signals
+const contradictionModel = {
   user: {
-    decision_authority: 0.7,
-    influenced_by: ["skeptical_cto", "growth_cmo"]
+    stated_interest: "AI safety",
+    behavioral_pattern: "skips crypto, dwells on hiring",
+    latent_concern: "scaling team risks"
   },
-  skeptical_cto: {
-    concerns: ["security", "technical_debt"],
-    communication_style: "data_driven",
-    influence_on_decision: 0.9
+  revealed_priorities: {
+    "AI safety": 0.6,    // explicit signal
+    "hiring culture": 0.8, // implicit (dwell pattern)
+    "cryptography": 0.2   // rejection pattern
   }
 };
 
-// Recommendations account for stakeholder concerns
-const recommendation = optimizeForStakeholders(content, stakeholderModel);
+// Recommendations account for revealed patterns, not stated ones
+const recommendation = optimizeForBelieveContradict(content, contradictionModel);
 ```
 
 ## Learning Loops: Engagement vs. Business Outcomes

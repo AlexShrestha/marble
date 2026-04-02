@@ -89,6 +89,7 @@ export { Scorer } from './scorer.js';
 export { ArcReranker } from './arc.js';
 export {
   Swarm, Clone, SwarmAgent, AGENT_LENSES,
+  swarmScore,
   computeDynamicWeights,
   detectDomain,
   generateAgentFleet, invalidateFleetCache, getFleetCacheStats,

@@ -20,6 +20,10 @@ export class Clone {
    */
   takeSnapshot() {
     const user = this.kg.user;
+    if (!user) {
+      this._snapshot = { interests: {}, patterns: {}, context: {}, source_trust: {}, created_at: new Date().toISOString() };
+      return;
+    }
 
     // Build active interest map with decay applied
     const interests = {};

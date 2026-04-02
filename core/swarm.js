@@ -15,7 +15,7 @@
  */
 
 import { Clone } from './clone.js';
-import Anthropic from '@anthropic-ai/sdk';
+import { createLLMClient, defaultModel } from './llm-provider.js';
 
 // ── Agent Definitions ──────────────────────────────────────────
 
@@ -553,6 +553,9 @@ export function swarmScore(story, kg, opts = {}) {
     score = motivationScore;
   }
 
+  const activeClones = _getActiveClones(kg);
+  const clone_predictions = activeClones.length > 0 ? _clonePredictions(activeClones, story) : null;
+
   return {
     score: Math.round(score * 1000) / 1000,
     agentScores,
@@ -560,6 +563,7 @@ export function swarmScore(story, kg, opts = {}) {
     motivationScore: Math.round(motivationScore * 1000) / 1000,
     collaborativeScore: hasCollab ? Math.round(collabScore * 1000) / 1000 : null,
     isSparse,
+    ...(clone_predictions ? { clone_predictions } : {}),
   };
 }
 
@@ -672,9 +676,9 @@ export async function detectDomain(contentSample, useLLM = false) {
 
   if (!detectedDomain && (useLLM || signals.length === 0)) {
     try {
-      const client = new Anthropic();
+      const client = createLLMClient();
       const response = await client.messages.create({
-        model: 'claude-sonnet-4-6',
+        model: process.env.MARBLE_LLM_MODEL || defaultModel('fast'),
         max_tokens: 150,
         messages: [{
           role: 'user',
@@ -779,7 +783,7 @@ function _buildSpecScorer(spec) {
 }
 
 async function _generateFleetFromLLM(domain, contentSample, kgSummary, llm) {
-  const client = llm || new Anthropic();
+  const client = llm || createLLMClient();
 
   // Compact KG representation: pull what matters for motivation inference
   const kg = kgSummary || {};
@@ -837,7 +841,7 @@ Rules:
 - screening_question must be specific enough that two similar items could get different answers`;
 
   const response = await client.messages.create({
-    model: 'claude-opus-4-6',
+    model: process.env.MARBLE_LLM_MODEL || defaultModel('heavy'),
     max_tokens: 1600,
     messages: [{ role: 'user', content: prompt }]
   });
@@ -883,22 +887,56 @@ function _buildStaticFleet(domain) {
 }
 
 /**
+ * Return active UserClone hypotheses from a KG instance (max 3 by default).
+ * @param {Object} kg - KG instance with getActiveClones()
+ * @param {number} [max=3]
+ * @returns {import('./types.js').UserClone[]}
+ */
+function _getActiveClones(kg, max = 3) {
+  if (typeof kg?.getActiveClones === 'function') {
+    return kg.getActiveClones().slice(0, max);
+  }
+  return (kg?.user?.clones || []).filter(c => c.status === 'active').slice(0, max);
+}
+
+/**
+ * Generate per-clone predictions for a story (used in feedback loop).
+ * @param {import('./types.js').UserClone[]} clones
+ * @param {Object} story
+ * @returns {Object} { cloneId: predictedScore }
+ */
+function _clonePredictions(clones, story) {
+  const out = {};
+  for (const clone of clones) {
+    // Simple heuristic: base on clone confidence × title relevance keyword match
+    const text = `${story.title || ''} ${story.summary || ''}`.toLowerCase();
+    const kw = clone.hypothesis.toLowerCase().split(/\s+/).filter(w => w.length > 4);
+    const hits = kw.filter(w => text.includes(w)).length;
+    out[clone.id] = Math.min(1, clone.confidence * 0.6 + (hits / Math.max(1, kw.length)) * 0.4);
+  }
+  return out;
+}
+
+/**
  * Spawn a dynamic agent fleet from domain + KG context.
  *
- * Uses claude-opus-4-6 to generate 5 domain/KG-aware agents.
- * Caches per (domain, kgHash). Falls back to static agents on LLM failure.
+ * Uses the configured LLM provider to generate 5 domain/KG-aware agents.
+ * Caches per (domain, kgHash) unless active clones are present or
+ * MARBLE_FLEET_CACHE=0 (default). Set MARBLE_FLEET_CACHE=1 to force caching.
  *
  * @param {string} domain - Content domain (e.g. "HackerNews", "movies", "Twitter")
  * @param {string} contentSample - Sample content for context
  * @param {Object} kgSummary - Compact KG summary { interests, insights, ... }
- * @param {Object} [llm] - Optional pre-constructed Anthropic client
+ * @param {Object} [llm] - Optional pre-constructed LLM client
+ * @param {import('./types.js').UserClone[]} [clones] - Active UserClone hypotheses; bypasses cache
  * @returns {Promise<{ agents, weights, scoreStory, source, domain, cacheKey }>}
  */
-export async function generateAgentFleet(domain, contentSample, kgSummary, llm = null) {
+export async function generateAgentFleet(domain, contentSample, kgSummary, llm = null, clones = null) {
   const kgHash = _hashKgSummary(kgSummary);
   const cacheKey = `${domain || 'unknown'}:${kgHash}`;
+  const useCache = process.env.MARBLE_FLEET_CACHE === '1' && !clones?.length;
 
-  if (_fleetCache.has(cacheKey)) {
+  if (useCache && _fleetCache.has(cacheKey)) {
     return { ..._fleetCache.get(cacheKey), cacheKey, fromCache: true };
   }
 
@@ -995,7 +1033,7 @@ export async function explodeAgentQuestions(agent, contentSample, kgSummary, llm
   // 5 shallow questions empirically (see marble#25 architecture decision).
   const n = opts.n || 3;
 
-  const client = llm || new Anthropic();
+  const client = llm || createLLMClient();
 
   const agentSpec = typeof agent === 'string' ? { name: agent, motivation_frame: `${agent} lens` } : agent;
   const agentName = agentSpec.name || 'unknown';
@@ -1073,7 +1111,7 @@ Return ONLY a JSON array, no commentary:
 
   try {
     const response = await client.messages.create({
-      model: 'claude-opus-4-6',
+      model: process.env.MARBLE_LLM_MODEL || defaultModel('heavy'),
       max_tokens: 800,
       messages: [{ role: 'user', content: prompt }]
     });
@@ -1484,4 +1522,30 @@ export function deduplicateAgentQuestions(agentResults, threshold = 0.55) {
     const score = qWithData > 0 ? Math.round((scoreSum / qWithData) * 1000) / 1000 : 0;
     return { ...ar, score, questionsWithData: qWithData };
   });
+}
+
+/**
+ * Record user feedback and update UserClone confidences.
+ *
+ * @param {Object} kg - KG instance with updateCloneConfidence / killWeakClones
+ * @param {string} contentId - ID of the content item
+ * @param {Object} clonePredictions - { cloneId: predictedScore } from swarmScore
+ * @param {number} actualEngagement - Observed engagement score (0–1)
+ */
+export function recordFeedback(kg, contentId, clonePredictions, actualEngagement) {
+  if (!clonePredictions || typeof kg?.updateCloneConfidence !== 'function') return;
+
+  for (const [cloneId, predicted] of Object.entries(clonePredictions)) {
+    const predictionCorrect = Math.abs(predicted - actualEngagement) < 0.3;
+    kg.updateCloneConfidence(cloneId, predictionCorrect);
+
+    // Log evaluation on the clone object itself
+    const clone = kg.user?.clones?.find(c => c.id === cloneId);
+    if (clone) {
+      clone.evaluations = clone.evaluations || [];
+      clone.evaluations.push({ contentId, predicted, actual: actualEngagement });
+    }
+  }
+
+  kg.killWeakClones?.();
 }

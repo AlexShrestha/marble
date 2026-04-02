@@ -87,8 +87,51 @@ export class Marblism {
 export { KnowledgeGraph } from './kg.js';
 export { Scorer } from './scorer.js';
 export { ArcReranker } from './arc.js';
-export { Swarm, Clone, AGENT_LENSES } from './swarm.js';
+export {
+  Swarm, Clone, SwarmAgent, AGENT_LENSES,
+  computeDynamicWeights,
+  detectDomain,
+  generateAgentFleet, invalidateFleetCache, getFleetCacheStats,
+  explodeAgentQuestions,
+} from './swarm.js';
 export { ClonePopulation, evaluateFitness } from './evolution.js';
 export { SignalProcessor } from './signals.js';
 export { Observer } from './observer.js';
 export { SCORE_WEIGHTS, ARC_SLOTS } from './types.js';
+
+// Collaborative filtering
+export { CollaborativeFilter } from './collaborative-filter.js';
+
+// Domain-agnostic knowledge extraction
+export { extractEntityAttributes, attributeCount } from './entity-extractor.js';
+export { detectDomain as detectItemDomain, getDomainSchema, getDomainDimensions, getDimension, DOMAINS } from './domain-schemas.js';
+
+// L1.5 Insight Mining Swarm
+export { runInsightSwarm, getL2Seeds } from './insight-swarm.js';
+
+// L2 Inference Engine
+export { InferenceEngine } from './inference-engine.js';
+
+// L3 Clone Simulation Queue
+export { SimulationQueue } from './simulation-queue.js';
+
+// Topic Insight Engine (LLM-powered preference learning)
+export { TopicInsightEngine, GapSimulator } from './topic-insight-engine.js';
+
+// Secondary context collection (question-driven)
+export { QuestionEngine } from './question-engine.js';
+
+// Use-case profiles and scorer factory
+export { USE_CASE_PROFILES, createProfileConfig, createScorerForUseCase } from './use-case-profiles.js';
+
+// World context cache (KG-backed)
+export { cacheWorldContext, getWorldContextCache, checkCacheValidity, getWorldContextOrFallback, invalidateWorldContextCache, getCacheStats } from './world-context-cache.js';
+
+// Lightweight scorer (mobile/edge)
+export { default as LightweightScorer } from './lightweight-scorer.js';
+
+// WorldSim bridge (neutral adapter: WorldSim archetypes → Marble KG)
+export { readWorldContext, writeWorldContext, syncBatch, writeSystemAOutput, getSystemAFromCache, getWorldContextFromCache, toWorldSimContext } from './worldsim-bridge.js';
+
+// World context scheduler (nightly cache refresh, user data ingest)
+export { scheduleNightlyCacheRefresh, handleUserDataIngest, getCacheRefreshStatus } from './world-context-scheduler.js';

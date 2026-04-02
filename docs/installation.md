@@ -167,7 +167,52 @@ The optional context passed to `select()`:
 
 ## Environment Variables
 
-Core Marble needs **no environment variables**. Optional variables for adapters:
+Core Marble needs **no environment variables** in its default local mode. Optional variables:
+
+### Embeddings Provider
+
+By default, Marble uses a local ONNX model (`all-MiniLM-L6-v2`) — no API key, no network calls. To use a cloud embeddings API instead, set `EMBEDDINGS_PROVIDER`:
+
+| Variable | Description |
+|----------|-------------|
+| `EMBEDDINGS_PROVIDER` | `local` (default), `openai`, or `deepseek` |
+| `OPENAI_API_KEY` | Required when `EMBEDDINGS_PROVIDER=openai` |
+| `OPENAI_EMBEDDING_MODEL` | Optional. Default: `text-embedding-3-small` |
+| `DEEPSEEK_API_KEY` | Required when `EMBEDDINGS_PROVIDER=deepseek` |
+| `DEEPSEEK_EMBEDDING_MODEL` | Optional. Default: `deepseek-embedding` |
+
+**Important:** Different providers output different vector dimensions (local=384, OpenAI=1536, DeepSeek=1536). Do **not** mix providers across an existing knowledge graph — delete the KG file and let it rebuild after switching providers.
+
+**Anthropic note:** Anthropic does not provide an embeddings API. Setting `EMBEDDINGS_PROVIDER=anthropic` logs a warning and falls back to local ONNX. Use the `llm` constructor option to plug Anthropic's Claude into Swarm mode instead.
+
+#### Example configurations
+
+```bash
+# Local (default) — no API keys needed
+EMBEDDINGS_PROVIDER=local
+
+# OpenAI
+EMBEDDINGS_PROVIDER=openai
+OPENAI_API_KEY=sk-...
+
+# DeepSeek
+EMBEDDINGS_PROVIDER=deepseek
+DEEPSEEK_API_KEY=sk-...
+```
+
+You can also pass the provider directly to the constructor (overrides env vars):
+
+```javascript
+import { createEmbeddingsProvider } from 'marblism/core/embeddings.js';
+
+const emb = createEmbeddingsProvider({
+  provider: 'openai',
+  apiKey: 'sk-...',       // or omit to read OPENAI_API_KEY
+  model: 'text-embedding-3-large'
+});
+```
+
+### Source & delivery adapters
 
 | Variable | Used by | Required? |
 |----------|---------|-----------|

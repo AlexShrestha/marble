@@ -13,10 +13,13 @@
  */
 
 import { createWriteStream, mkdirSync, existsSync, statSync } from 'fs';
-import { pipeline } from 'stream/promises';
+import { pipeline, Transform } from 'stream';
+import { promisify } from 'util';
 import https from 'https';
 import path from 'path';
 import { fileURLToPath } from 'url';
+
+const pipelineAsync = promisify(pipeline);
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const MODELS_DIR = path.join(__dirname, '..', 'models');
@@ -30,12 +33,12 @@ const FILES = [
   {
     url: 'https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json',
     dest: 'tokenizer.json',
-    minBytes: 100,
+    minBytes: 400_000, // ~466KB
   },
   {
     url: 'https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/vocab.txt',
     dest: 'vocab.txt',
-    minBytes: 100,
+    minBytes: 200_000, // ~231KB
   },
 ];
 
@@ -62,15 +65,18 @@ async function download(url, destPath) {
   const total = parseInt(res.headers['content-length'] || '0', 10);
   let received = 0;
 
-  res.on('data', chunk => {
-    received += chunk.length;
-    if (total > 0) {
-      const pct = Math.round((received / total) * 100);
-      process.stdout.write(`\r  ${pct}% (${(received / 1e6).toFixed(1)}MB)`);
-    }
+  const progress = new Transform({
+    transform(chunk, _enc, cb) {
+      received += chunk.length;
+      if (total > 0) {
+        const pct = Math.round((received / total) * 100);
+        process.stdout.write(`\r  ${pct}% (${(received / 1e6).toFixed(1)}MB)`);
+      }
+      cb(null, chunk);
+    },
   });
 
-  await pipeline(res, createWriteStream(destPath));
+  await pipelineAsync(res, progress, createWriteStream(destPath));
   if (total > 0) process.stdout.write('\n');
 }
 

@@ -45,9 +45,12 @@ export class Marblism {
     }
 
     if (this.mode === 'swarm') {
+      if (!this.llm) {
+        throw new Error('Swarm scoring requires LLM_PROVIDER to be configured with a valid API key');
+      }
       // v2: Multi-agent swarm curation
       const swarm = new Swarm(this.kg, {
-        mode: this.llm ? 'deep' : 'fast',
+        mode: 'deep',
         llm: this.llm,
         topN: this.count
       });

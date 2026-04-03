@@ -1503,3 +1503,130 @@ export function recordFeedback(kg, contentId, clonePredictions, actualEngagement
 
   kg.killWeakClones?.();
 }
+
+// ─── INVESTIGATE PHASE ─────────────────────────────────────────────────────
+
+/**
+ * generateInvestigationQuestions — Identify targeted uncertainty gaps before scoring.
+ *
+ * Asks the LLM: "What do you NOT know about this user + content pair that would change
+ * your confidence?" Returns specific, actionable questions (not generic genre questions).
+ *
+ * This is the first step of the Investigate → Resolve → Judge → Score pipeline.
+ *
+ * @param {Object} story      - Candidate content {title, summary, topics, url, ...}
+ * @param {string} kgSummary  - Compact user profile summary (top insights, interests, hypotheses)
+ * @param {string} domain     - Content domain, e.g. 'movies', 'news', 'articles'
+ * @param {Object} [llm]      - Optional pre-constructed LLM client
+ * @returns {Promise<Array<{question: string, rationale: string, source_hint: string}>>}
+ *   Up to 5 investigation questions. Returns [] on error.
+ */
+export async function generateInvestigationQuestions(story, kgSummary, domain, llm = null) {
+  const contentSample = [
+    story.title || '',
+    story.summary || story.description || '',
+    (story.topics || []).slice(0, 5).join(', '),
+  ].filter(Boolean).join('\n').slice(0, 600);
+
+  const profileSummary = typeof kgSummary === 'string'
+    ? kgSummary.slice(0, 600)
+    : JSON.stringify(kgSummary || {}).slice(0, 600);
+
+  const client = llm || createLLMClient();
+
+  const prompt = `You are a recommendation system analyst. Your job is to identify SPECIFIC uncertainty gaps before scoring a ${domain} candidate for a user.
+
+User profile:
+${profileSummary}
+
+Candidate ${domain}:
+${contentSample}
+
+Task: Identify up to 5 specific things you do NOT know about this user-content pair that would most change your confidence in predicting whether the user wants this content.
+
+Rules:
+- Questions must be SPECIFIC to this user + content combination (not generic)
+- BAD: "What genres does this user like?" — too generic
+- GOOD: "Does this user prefer ensemble-cast films or single-protagonist narratives, given they watched both Avengers and John Wick highly?" — specific
+- Each question should target a real uncertainty gap visible from the profile vs content mismatch
+- source_hint: where the answer might come from (e.g. "watch history", "explicit rating", "social signal", "demographic inference")
+
+Return a JSON array of up to 5 objects:
+[{"question": "...", "rationale": "...", "source_hint": "..."}]
+
+Return ONLY the JSON array, no preamble.`;
+
+  try {
+    const response = await client.messages.create({
+      model: process.env.MARBLE_LLM_MODEL || defaultModel('heavy'),
+      max_tokens: 600,
+      messages: [{ role: 'user', content: prompt }],
+    });
+
+    const raw = response.content[0]?.type === 'text' ? response.content[0].text : '[]';
+    const jsonMatch = raw.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) return [];
+
+    const questions = JSON.parse(jsonMatch[0]);
+    return questions
+      .filter(q => q && typeof q.question === 'string')
+      .slice(0, 5)
+      .map(q => ({
+        question: q.question,
+        rationale: q.rationale || '',
+        source_hint: q.source_hint || '',
+      }));
+  } catch (err) {
+    return [];
+  }
+}
+
+/**
+ * swarmScoreDeep — Investigate → Score pipeline.
+ *
+ * When opts.mode === 'deep', runs generateInvestigationQuestions before scoring,
+ * attaching the uncertainty gaps to the result for downstream use.
+ *
+ * @param {Object} story   - Candidate content
+ * @param {Object} kg      - Knowledge graph
+ * @param {Object} [opts]  - Options {llm, userId, date, mode, kgSummary, domain, ...}
+ *   opts.mode: 'deep' to enable investigation phase (default: 'standard')
+ * @returns {Promise<Object>} swarmScore result + investigationQuestions (if deep mode)
+ */
+export async function swarmScoreDeep(story, kg, opts = {}) {
+  const baseResult = swarmScore(story, kg, opts);
+
+  if (opts.mode !== 'deep') {
+    return baseResult;
+  }
+
+  const domain = opts.domain || 'content';
+  const kgSummary = opts.kgSummary || _buildKgSummary(kg);
+
+  let investigationQuestions = [];
+  try {
+    investigationQuestions = await generateInvestigationQuestions(story, kgSummary, domain, opts.llm);
+  } catch (err) {
+    // Investigation failure is non-fatal; scoring proceeds
+    investigationQuestions = [];
+  }
+
+  return {
+    ...baseResult,
+    investigationQuestions,
+    mode: 'deep',
+  };
+}
+
+/** Build a compact KG summary string for LLM context. */
+function _buildKgSummary(kg) {
+  const user = kg?.user || {};
+  const insights = (user.insights || []).slice(0, 5).map(i => i.text || i).join('; ');
+  const interests = (user.interests || []).slice(0, 8).join(', ');
+  const hypotheses = (user.hypotheses || []).slice(0, 3).map(h => h.text || h).join('; ');
+  return [
+    insights && `Insights: ${insights}`,
+    interests && `Interests: ${interests}`,
+    hypotheses && `Hypotheses: ${hypotheses}`,
+  ].filter(Boolean).join('\n');
+}

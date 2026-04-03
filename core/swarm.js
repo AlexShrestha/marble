@@ -96,6 +96,7 @@ class SwarmAgent {
       ),
       '',
       'Pick your top 5 stories. For each, explain WHY this user needs to hear this TODAY.',
+      'Respond with a plain JSON object only — no code fences, no markdown, no explanation before or after.',
       'Format: { "picks": [{ "index": N, "score": 0-1, "reason": "..." }] }'
     ].join('\n');
   }
@@ -297,7 +298,13 @@ export class Swarm {
       const response = await this.options.llm(prompt);
 
       try {
-        const parsed = JSON.parse(response);
+        // Strip code fences if present (should not happen — prompt forbids them, but guard anyway)
+        const clean = response.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+        const parsed = JSON.parse(clean);
+        if (!parsed.picks || !Array.isArray(parsed.picks)) {
+          console.warn(`[Swarm] ${agent.lens.name}: parsed response missing 'picks' array — skipping agent (score 0)`);
+          return;
+        }
         for (const pick of parsed.picks || []) {
           const story = stories[pick.index - 1];
           if (story) {
@@ -308,9 +315,11 @@ export class Swarm {
             });
           }
         }
-      } catch {
-        // Fallback to heuristic if LLM parsing fails
-        agent.evaluate(stories);
+      } catch (err) {
+        console.warn(`[Swarm] ${agent.lens.name}: failed to parse LLM response — skipping agent (score 0). Error: ${err.message}`);
+        console.warn(`[Swarm] ${agent.lens.name}: raw response was: ${String(response).slice(0, 300)}`);
+        // Do NOT fall back to heuristics. This agent contributes score 0.
+        // Remaining agents continue normally.
       }
     });
 

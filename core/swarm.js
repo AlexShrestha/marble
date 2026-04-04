@@ -154,8 +154,10 @@ class SwarmAgent {
       ),
       '',
       'Pick your top 5 stories. For each, explain WHY this user needs to hear this TODAY.',
-      'Respond with ONLY a JSON object. No markdown fences, no explanation text.',
-      'Format: { "picks": [{ "index": N, "score": 0-1, "reason": "..." }] }'
+      '',
+      'REQUIRED OUTPUT FORMAT — respond with ONLY this JSON, no other text, no markdown fences:',
+      '{ "picks": [{ "index": N, "score": 0.0-1.0, "reason": "..." }] }',
+      'The top-level key MUST be "picks". Do not use any other key name.'
     ].join('\n');
   }
 
@@ -363,9 +365,25 @@ export class Swarm {
           return;
         }
         if (!parsed.picks || !Array.isArray(parsed.picks)) {
-          console.warn(`[Swarm] PARSE SKIP — ${agent.lens.name}: parsed response missing 'picks' array (got keys: ${Object.keys(parsed).join(', ')}). Agent contributes score 0.`);
-          console.warn(`[Swarm] PARSE SKIP — ${agent.lens.name}: raw response snippet: ${String(response).slice(0, 300)}`);
-          return;
+          // Key alias fallback: LLMs (especially Contrarian/Timing) sometimes use wrong key names
+          const PICKS_ALIASES = [
+            'recommendations', 'selections', 'results', 'stories', 'items',
+            'top_stories', 'top', 'choices', 'analysis', 'signals', 'today'
+          ];
+          let remapped = false;
+          for (const alias of PICKS_ALIASES) {
+            if (parsed[alias] && Array.isArray(parsed[alias])) {
+              console.warn(`[Swarm] KEY ALIAS — ${agent.lens.name}: 'picks' missing, found '${alias}' — remapping. Check prompt format anchor.`);
+              parsed.picks = parsed[alias];
+              remapped = true;
+              break;
+            }
+          }
+          if (!remapped) {
+            console.warn(`[Swarm] PARSE SKIP — ${agent.lens.name}: parsed response missing 'picks' array (got keys: ${Object.keys(parsed).join(', ')}). Agent contributes score 0.`);
+            console.warn(`[Swarm] PARSE SKIP — ${agent.lens.name}: raw response snippet: ${String(response).slice(0, 300)}`);
+            return;
+          }
         }
         for (const pick of parsed.picks || []) {
           const story = stories[pick.index - 1];

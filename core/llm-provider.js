@@ -23,7 +23,8 @@ const PROVIDER_DEFAULTS = {
   deepseek:  { heavy: 'deepseek-chat',           fast: 'deepseek-chat' },
 };
 
-const DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
+// Read lazily at call time — module is imported before dotenv runs in ESM
+const getDeepSeekBaseURL = () => process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com';
 
 /**
  * Build a unified LLM client from env config.
@@ -60,6 +61,7 @@ export function createLLMClient(opts = {}) {
  * @param {string} [provider]
  */
 export function defaultModel(tier = 'heavy', provider = null) {
+  if (process.env.MARBLE_LLM_MODEL) return process.env.MARBLE_LLM_MODEL;
   const p = provider || process.env.LLM_PROVIDER || 'anthropic';
   return PROVIDER_DEFAULTS[p]?.[tier] || PROVIDER_DEFAULTS.anthropic[tier];
 }
@@ -83,16 +85,43 @@ function _buildOpenAIClient(opts) {
 }
 
 function _buildDeepSeekClient(opts) {
-  return _buildOpenAICompatClient('deepseek', {
-    apiKey: opts.apiKey || process.env.DEEPSEEK_API_KEY,
-    baseURL: DEEPSEEK_BASE_URL,
-  });
+  const apiKey = opts.apiKey || process.env.DEEPSEEK_API_KEY;
+  const baseURL = getDeepSeekBaseURL();
+  const isOllama = baseURL && !baseURL.includes('api.deepseek.com');
+
+  if (isOllama) {
+    // Self-hosted Ollama: uses x-api-key header, bypass OpenAI SDK to avoid auth conflicts.
+    // Disable TLS verification for self-hosted endpoints (e.g. Tailscale self-signed certs).
+    const ollamaBase = baseURL.replace(/\/v1\/?$/, '').replace(/^http:\/\//, 'https://');
+    process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+    return {
+      provider: 'deepseek',
+      defaultModel: (tier) => defaultModel(tier, 'deepseek'),
+      messages: {
+        async create({ model, max_tokens, messages }) {
+          const body = { model, stream: false, messages };
+          if (max_tokens) body.options = { num_predict: max_tokens };
+          const resp = await fetch(`${ollamaBase}/api/chat`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey },
+            body: JSON.stringify(body),
+          });
+          if (!resp.ok) throw new Error(`Ollama ${resp.status}: ${await resp.text()}`);
+          const data = await resp.json();
+          const text = data.message?.content || data.choices?.[0]?.message?.content || '';
+          return { content: [{ type: 'text', text }] };
+        },
+      },
+    };
+  }
+
+  return _buildOpenAICompatClient('deepseek', { apiKey, baseURL });
 }
 
-function _buildOpenAICompatClient(providerName, clientOpts) {
+function _buildOpenAICompatClient(providerName, { defaultHeaders, ...clientOpts }) {
   const OpenAI = _requireOpenAI();
 
-  const openai = new OpenAI(clientOpts);
+  const openai = new OpenAI({ ...clientOpts, ...(defaultHeaders && { defaultHeaders }) });
 
   // Wrap in Anthropic-compatible interface so swarm.js works unchanged
   return {

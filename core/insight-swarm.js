@@ -1,494 +1,346 @@
 /**
- * Marble L1.5 Insight Mining Swarm
+ * Marble L1.5 Dynamic Psychological Probe Committee
  *
- * Slot: L1.5 — runs after L1 facts are loaded, before L2 inference gate.
+ * Replaces 5 hardcoded heuristic agents with a dynamic LLM-generated committee.
  *
- * Five specialized agents interrogate L1 KG data in parallel, each with a
- * distinct analytical lens. High-confidence outputs (>= 0.7) are tagged as
- * L2 seeds so the inference engine can consume them directly.
+ * Flow:
+ *   1. Extract real KG data (what we actually know about the user)
+ *   2. LLM generates N agent personas tailored to that specific user's data
+ *   3. Each agent specialises in one psychological dimension:
+ *      desires, motivations, frustrations, dreams, challenges, fears, blind spots
+ *   4. Each agent generates 3-5 probing questions grounded in the user's real data
+ *   5. Outputs: Insight[] (backward-compatible) — each insight carries a probe question
+ *
+ * Requires: LLM_PROVIDER + API key in env (deepseek, anthropic, or openai)
  *
  * Usage:
  *   import { runInsightSwarm } from './insight-swarm.js';
  *   const insights = await runInsightSwarm(kg);
- *   // insights: Insight[]  (sorted by confidence desc)
+ *   // insights: Insight[]  (sorted by priority desc)
+ *
+ * Extended usage (custom client):
+ *   const insights = await runInsightSwarm(kg, { llmClient, model: 'deepseek-chat' });
  */
 
-// ─── TYPE ──────────────────────────────────────────────────────────────────
+import { createLLMClient, defaultModel } from './llm-provider.js';
+
+// ── Parse Failure Counter (kept for benchmark compat) ─────────────────────
+export const parseFailureCounter = {
+  counts: {},
+  increment(agentName) { this.counts[agentName] = (this.counts[agentName] || 0) + 1; },
+  reset()  { this.counts = {}; },
+  total()  { return Object.values(this.counts).reduce((s, v) => s + v, 0); },
+  report() { return { total: this.total(), byAgent: { ...this.counts } }; },
+};
+
+// ── KG Extraction ──────────────────────────────────────────────────────────
 
 /**
- * @typedef {Object} Insight
- * @property {string} insight          - Human-readable finding
- * @property {number} confidence       - 0-1, certainty of the pattern
- * @property {string[]} supporting_facts - L1 fact refs that back the insight
- * @property {string} lens             - Which agent produced it
- * @property {boolean} [l2_seed]       - true if confidence >= 0.7 (feeds L2)
+ * Pull everything real out of the KG into a plain object for the LLM.
+ * If the KG is sparse we still give the LLM what we have — the committee
+ * adapts to the data, not the other way around.
  */
+function extractKGSummary(kg) {
+  const user     = kg.user || kg.getUser?.() || {};
+  const memNodes = kg.getMemoryNodesSummary?.() || { beliefs: [], preferences: [], identities: [], confidence: {} };
+  const dimPrefs = kg.getDimensionalPreferences?.() || [];
 
-// ─── HELPERS ───────────────────────────────────────────────────────────────
+  const interests  = (user.interests  || []).map(i => ({ topic: i.topic, weight: i.weight, trend: i.trend }));
+  const history    = (user.history    || []).filter(h => h.story_id && !h.story_id.startsWith('sim_'));
+  const beliefs    = memNodes.beliefs    || [];
+  const identities = memNodes.identities || [];
 
-function getL1Facts(kg) {
-  const summary = kg.getMemoryNodesSummary
-    ? kg.getMemoryNodesSummary()
-    : { beliefs: [], preferences: [], identities: [], confidence: {} };
-
-  const user = kg.user || kg.getUser?.() || {};
-  const interests = user.interests || [];
-  const history   = user.history   || [];
-  const dimPrefs  = kg.getDimensionalPreferences?.() || [];
-
-  return { ...summary, interests, history, dimPrefs, user };
-}
-
-// ─── AGENT 1: ContradictionAgent ──────────────────────────────────────────
-
-/**
- * Finds tensions between stated preferences/beliefs and observed behaviour
- * (reaction history + dimensional preferences).
- */
-function runContradictionAgent(facts) {
-  const insights = [];
-
-  // Beliefs vs negative reactions on the same topic
-  for (const belief of facts.beliefs) {
-    const topic = belief.topic?.toLowerCase();
-    if (!topic) continue;
-
-    const negativeHits = facts.history.filter(h =>
-      h.reaction === 'down' &&
-      h.topics?.some(t => t.toLowerCase().includes(topic))
-    );
-    const positiveHits = facts.history.filter(h =>
-      (h.reaction === 'up' || h.reaction === 'share') &&
-      h.topics?.some(t => t.toLowerCase().includes(topic))
-    );
-
-    if (negativeHits.length >= 2 && belief.strength >= 0.6) {
-      const ratio = negativeHits.length / Math.max(1, positiveHits.length + negativeHits.length);
-      const confidence = Math.min(0.9, 0.4 + ratio * 0.5 + (belief.strength - 0.5) * 0.2);
-      insights.push({
-        insight: `States strong belief in "${belief.topic}" (strength ${belief.strength.toFixed(2)}) but consistently rejects related content (${negativeHits.length} down-votes vs ${positiveHits.length} up-votes).`,
-        confidence,
-        supporting_facts: [
-          `belief:${belief.topic}:strength=${belief.strength.toFixed(2)}`,
-          ...negativeHits.slice(0, 3).map(h => `history:${h.story_id}:down`)
-        ],
-        lens: 'contradiction'
-      });
-    }
-  }
-
-  // Dimensional preference conflicts: high strength but few positive reactions
-  const dimByDomain = {};
-  for (const dp of facts.dimPrefs) {
-    if (!dimByDomain[dp.domain]) dimByDomain[dp.domain] = [];
-    dimByDomain[dp.domain].push(dp);
-  }
-  for (const [domain, prefs] of Object.entries(dimByDomain)) {
-    const strongPositive = prefs.filter(p => p.strength >= 0.6);
-    const strongNegative = prefs.filter(p => p.strength <= -0.4);
-    if (strongPositive.length > 0 && strongNegative.length > 0) {
-      const confidence = Math.min(0.85, 0.45 + (strongNegative.length / (strongPositive.length + strongNegative.length)) * 0.4);
-      insights.push({
-        insight: `In domain "${domain}", user has ${strongPositive.length} strongly-liked dimensions but also ${strongNegative.length} strongly-disliked — mixed signals within the same domain suggest conflicting sub-preferences.`,
-        confidence,
-        supporting_facts: [
-          ...strongPositive.slice(0, 2).map(p => `dim:${domain}:${p.dimensionId}=+${p.strength.toFixed(2)}`),
-          ...strongNegative.slice(0, 2).map(p => `dim:${domain}:${p.dimensionId}=${p.strength.toFixed(2)}`)
-        ],
-        lens: 'contradiction'
-      });
-    }
-  }
-
-  return insights;
-}
-
-// ─── AGENT 2: TemporalDriftAgent ──────────────────────────────────────────
-
-/**
- * Detects values/interests shifting over time by comparing early vs recent
- * reaction windows.
- */
-function runTemporalDriftAgent(facts) {
-  const insights = [];
-  const history = facts.history;
-  if (history.length < 10) return insights;
-
-  const sorted = [...history].sort((a, b) => new Date(a.date) - new Date(b.date));
-  const mid = Math.floor(sorted.length / 2);
-  const early  = sorted.slice(0, mid);
-  const recent = sorted.slice(mid);
-
-  // Topic frequency comparison
-  const topicFreq = (entries) => {
-    const freq = {};
-    for (const h of entries) {
-      for (const t of (h.topics || [])) {
-        const key = t.toLowerCase();
-        if (!freq[key]) freq[key] = { up: 0, down: 0, skip: 0 };
-        if (h.reaction === 'up' || h.reaction === 'share') freq[key].up++;
-        else if (h.reaction === 'down') freq[key].down++;
-        else freq[key].skip++;
-      }
-    }
-    return freq;
-  };
-
-  const earlyFreq  = topicFreq(early);
-  const recentFreq = topicFreq(recent);
-
-  const allTopics = new Set([...Object.keys(earlyFreq), ...Object.keys(recentFreq)]);
-
-  for (const topic of allTopics) {
-    const e = earlyFreq[topic]  || { up: 0, down: 0, skip: 0 };
-    const r = recentFreq[topic] || { up: 0, down: 0, skip: 0 };
-
-    const earlyScore  = (e.up - e.down) / Math.max(1, e.up + e.down + e.skip);
-    const recentScore = (r.up - r.down) / Math.max(1, r.up + r.down + r.skip);
-    const drift = recentScore - earlyScore;
-
-    if (Math.abs(drift) >= 0.4 && (e.up + e.down + r.up + r.down) >= 4) {
-      const direction = drift > 0 ? 'growing' : 'declining';
-      const confidence = Math.min(0.88, 0.45 + Math.abs(drift) * 0.5);
-      insights.push({
-        insight: `Interest in "${topic}" is ${direction} over time (early engagement score ${earlyScore.toFixed(2)} → recent ${recentScore.toFixed(2)}, drift ${drift > 0 ? '+' : ''}${drift.toFixed(2)}).`,
-        confidence,
-        supporting_facts: [
-          `temporal:${topic}:early_score=${earlyScore.toFixed(2)}`,
-          `temporal:${topic}:recent_score=${recentScore.toFixed(2)}`,
-          `temporal:${topic}:sample_size=${e.up+e.down+r.up+r.down}`
-        ],
-        lens: 'temporal_drift'
-      });
-    }
-  }
-
-  // Interest trend flags from KG
-  for (const interest of facts.interests) {
-    if (interest.trend === 'falling' && interest.weight >= 0.5) {
-      insights.push({
-        insight: `Topic "${interest.topic}" has a high weight (${interest.weight.toFixed(2)}) but is trending downward — may represent a fading but once-strong interest.`,
-        confidence: 0.62,
-        supporting_facts: [
-          `interest:${interest.topic}:weight=${interest.weight.toFixed(2)}`,
-          `interest:${interest.topic}:trend=falling`
-        ],
-        lens: 'temporal_drift'
-      });
-    }
-  }
-
-  return insights;
-}
-
-// ─── AGENT 3: CorrelationAgent ────────────────────────────────────────────
-
-/**
- * Surfaces unexpected co-occurrence links across domains — e.g. stories
- * liked together that span career + health, or belief clusters that bridge
- * unrelated domains.
- */
-function runCorrelationAgent(facts) {
-  const insights = [];
-
-  // Build co-reaction map: when user reacts positively to a story, record ALL topics together
-  const coMatrix = {};
-  for (const h of facts.history) {
-    if (h.reaction !== 'up' && h.reaction !== 'share') continue;
-    const topics = (h.topics || []).map(t => t.toLowerCase());
-    for (let i = 0; i < topics.length; i++) {
-      for (let j = i + 1; j < topics.length; j++) {
-        const key = [topics[i], topics[j]].sort().join('|||');
-        coMatrix[key] = (coMatrix[key] || 0) + 1;
-      }
-    }
-  }
-
-  // Find pairs that co-occur more than expected (>= 3 times)
-  for (const [pair, count] of Object.entries(coMatrix)) {
-    if (count < 3) continue;
-    const [a, b] = pair.split('|||');
-
-    // Check that individual frequencies are not trivially linked
-    const aCount = facts.history.filter(h =>
-      (h.reaction === 'up' || h.reaction === 'share') &&
-      h.topics?.some(t => t.toLowerCase() === a)
-    ).length;
-    const bCount = facts.history.filter(h =>
-      (h.reaction === 'up' || h.reaction === 'share') &&
-      h.topics?.some(t => t.toLowerCase() === b)
-    ).length;
-
-    const expected = (aCount * bCount) / Math.max(1, facts.history.length);
-    const lift = count / Math.max(0.01, expected);
-
-    if (lift >= 2.5) {
-      const confidence = Math.min(0.85, 0.4 + Math.min(lift / 10, 0.3) + Math.min(count / 20, 0.15));
-      insights.push({
-        insight: `Unexpected cross-domain link: "${a}" and "${b}" co-occur ${count}× in positive reactions (lift ${lift.toFixed(1)}x above baseline) — suggests an untracked bridging interest.`,
-        confidence,
-        supporting_facts: [
-          `cooccurrence:${a}+${b}:count=${count}`,
-          `cooccurrence:${a}+${b}:lift=${lift.toFixed(1)}`,
-          `topic:${a}:positive_count=${aCount}`,
-          `topic:${b}:positive_count=${bCount}`
-        ],
-        lens: 'correlation'
-      });
-    }
-  }
-
-  // Cross-domain belief clusters
-  const beliefTopics = facts.beliefs.map(b => b.topic?.toLowerCase()).filter(Boolean);
-  const identityDomains = facts.identities.map(i => i.role?.toLowerCase()).filter(Boolean);
-  const overlap = beliefTopics.filter(t => identityDomains.some(d => d.includes(t) || t.includes(d)));
-  if (overlap.length >= 2) {
-    insights.push({
-      insight: `Identity domains and belief topics overlap on: ${overlap.slice(0, 4).join(', ')} — identity may be reinforcing or constraining belief formation in these areas.`,
-      confidence: 0.66,
-      supporting_facts: overlap.slice(0, 4).map(t => `belief-identity-overlap:${t}`)
-    });
-  }
-
-  return insights;
-}
-
-// ─── AGENT 4: BlindSpotAgent ──────────────────────────────────────────────
-
-/**
- * Identifies what is absent from the KG that should be present given other facts.
- * E.g. strong career identity but no health/wellness signals, or many beliefs but
- * no corresponding confidence entries.
- */
-function runBlindSpotAgent(facts) {
-  const insights = [];
-
-  const beliefTopics     = new Set(facts.beliefs.map(b => b.topic?.toLowerCase()).filter(Boolean));
-  const confidenceDomains = new Set(Object.keys(facts.confidence || {}).map(k => k.toLowerCase()));
-  const identityDomains   = new Set(facts.identities.map(i => i.role?.toLowerCase()).filter(Boolean));
-  const interestTopics    = new Set(facts.interests.map(i => i.topic?.toLowerCase()).filter(Boolean));
-
-  // Strong beliefs with no confidence tracking
-  for (const belief of facts.beliefs) {
-    const t = belief.topic?.toLowerCase();
-    if (!t) continue;
-    if (belief.strength >= 0.7 && !confidenceDomains.has(t)) {
-      insights.push({
-        insight: `Strong belief in "${belief.topic}" (strength ${belief.strength.toFixed(2)}) but no confidence score tracked for this domain — blind spot in self-calibration.`,
-        confidence: 0.68,
-        supporting_facts: [
-          `belief:${belief.topic}:strength=${belief.strength.toFixed(2)}`,
-          `missing:confidence:${belief.topic}`
-        ],
-        lens: 'blind_spot'
-      });
-    }
-  }
-
-  // Career/professional identity without any health/wellness interests
-  const hasCareerIdentity = [...identityDomains].some(d => d.includes('career') || d.includes('work') || d.includes('professional'));
-  const hasHealthInterest = [...interestTopics].some(t => t.includes('health') || t.includes('wellness') || t.includes('fitness'));
-  if (hasCareerIdentity && !hasHealthInterest && facts.history.length >= 20) {
-    insights.push({
-      insight: 'Professional identity is present but health/wellness is entirely absent from interests — common blind spot where career focus crowds out self-care signals.',
-      confidence: 0.72,
-      supporting_facts: [
-        'identity:career_or_professional:present',
-        'interest:health/wellness:absent',
-        `history:sample_size=${facts.history.length}`
-      ],
-      lens: 'blind_spot'
-    });
-  }
-
-  // Topics frequently in history but not in interests/beliefs
-  const historyTopicCounts = {};
-  for (const h of facts.history) {
+  // Aggregate topic signals from real history
+  const topicSignals = {};
+  for (const h of history) {
     for (const t of (h.topics || [])) {
-      const key = t.toLowerCase();
-      historyTopicCounts[key] = (historyTopicCounts[key] || 0) + 1;
+      const k = t.toLowerCase();
+      if (!topicSignals[k]) topicSignals[k] = { up: 0, down: 0, share: 0 };
+      if (h.reaction === 'up')    topicSignals[k].up++;
+      if (h.reaction === 'down')  topicSignals[k].down++;
+      if (h.reaction === 'share') topicSignals[k].share++;
     }
   }
-  for (const [topic, count] of Object.entries(historyTopicCounts)) {
-    if (count >= 5 && !interestTopics.has(topic) && !beliefTopics.has(topic)) {
-      insights.push({
-        insight: `Topic "${topic}" appears ${count}× in reaction history but is absent from tracked interests and beliefs — unacknowledged recurring interest.`,
-        confidence: Math.min(0.80, 0.45 + Math.min(count / 30, 0.35)),
-        supporting_facts: [
-          `history:${topic}:count=${count}`,
-          `interest:${topic}:absent`,
-          `belief:${topic}:absent`
-        ],
-        lens: 'blind_spot'
-      });
-    }
-  }
+  const topTopics = Object.entries(topicSignals)
+    .sort((a, b) => (b[1].up + b[1].share) - (a[1].up + a[1].share))
+    .slice(0, 10)
+    .map(([t, v]) => ({ topic: t, ...v }));
 
-  return insights;
-}
-
-// ─── AGENT 5: IntensityAgent ──────────────────────────────────────────────
-
-/**
- * Ranks what the user cares about most vs least by aggregating signal density
- * across beliefs, interests, history reactions, and dimensional preferences.
- */
-function runIntensityAgent(facts) {
-  const insights = [];
-  const scores = {};
-
-  // Accumulate signal per topic
-  const bump = (topic, amount) => {
-    const key = topic.toLowerCase();
-    if (!scores[key]) scores[key] = { total: 0, signals: [] };
-    scores[key].total += amount;
+  return {
+    userId:      user.id || 'unknown',
+    interests:   interests.slice(0, 15),
+    topTopics,
+    beliefs:     beliefs.slice(0, 20),
+    identities:  identities.slice(0, 15),
+    dimPrefs:    dimPrefs.slice(0, 20),
+    historySize: history.length,
+    context:     user.context || {},
   };
-
-  for (const b of facts.beliefs) {
-    if (b.topic) bump(b.topic, b.strength * 2 + (b.evidence_count || 1) * 0.1);
-  }
-  for (const i of facts.interests) {
-    if (i.topic) bump(i.topic, i.weight * 1.5 + (i.trend === 'rising' ? 0.2 : i.trend === 'falling' ? -0.1 : 0));
-  }
-  for (const h of facts.history) {
-    const delta = h.reaction === 'up' ? 0.1 : h.reaction === 'share' ? 0.15 : h.reaction === 'down' ? -0.05 : 0;
-    for (const t of (h.topics || [])) bump(t, delta);
-  }
-  for (const dp of facts.dimPrefs) {
-    if (dp.domain) bump(dp.domain, dp.strength * dp.confidence);
-  }
-
-  const ranked = Object.entries(scores)
-    .filter(([, v]) => v.total > 0)
-    .sort((a, b) => b[1].total - a[1].total);
-
-  if (ranked.length < 2) return insights;
-
-  const top5    = ranked.slice(0, 5);
-  const bottom5 = ranked.slice(-5).reverse();
-  const maxScore = top5[0][1].total;
-
-  if (top5.length >= 3) {
-    insights.push({
-      insight: `Top signal-density topics: ${top5.map(([t, v]) => `${t} (${v.total.toFixed(1)})`).join(', ')} — these dominate the user's cognitive footprint.`,
-      confidence: Math.min(0.90, 0.55 + Math.min(ranked.length / 50, 0.35)),
-      supporting_facts: top5.map(([t, v]) => `intensity:${t}:score=${v.total.toFixed(1)}`),
-      lens: 'intensity'
-    });
-  }
-
-  if (bottom5.length >= 2) {
-    insights.push({
-      insight: `Weakest signal topics: ${bottom5.map(([t, v]) => `${t} (${v.total.toFixed(1)})`).join(', ')} — low density despite appearing in KG.`,
-      confidence: 0.58,
-      supporting_facts: bottom5.map(([t, v]) => `intensity:${t}:score=${v.total.toFixed(1)}`),
-      lens: 'intensity'
-    });
-  }
-
-  // Extreme concentration: top topic has >> 3× second topic
-  if (top5.length >= 2 && top5[0][1].total > top5[1][1].total * 3) {
-    insights.push({
-      insight: `Hyper-concentrated focus: "${top5[0][0]}" outscores the #2 topic by ${(top5[0][1].total / top5[1][1].total).toFixed(1)}× — risk of tunnel-vision or filter bubble.`,
-      confidence: 0.74,
-      supporting_facts: [
-        `intensity:${top5[0][0]}:score=${top5[0][1].total.toFixed(1)}`,
-        `intensity:${top5[1][0]}:score=${top5[1][1].total.toFixed(1)}`
-      ],
-      lens: 'intensity'
-    });
-  }
-
-  return insights;
 }
 
-// ─── AGGREGATOR ───────────────────────────────────────────────────────────
+// ── JSON Parser ────────────────────────────────────────────────────────────
+
+function _parseJSON(text, agentName = 'unknown') {
+  const s = String(text).trim();
+  try { return JSON.parse(s); } catch {}
+  const fence = s.match(/```json?\s*\n?([\s\S]*?)\n?\s*```/);
+  if (fence) { try { return JSON.parse(fence[1].trim()); } catch {} }
+  const obj = s.indexOf('{'), objE = s.lastIndexOf('}');
+  if (obj !== -1 && objE > obj) { try { return JSON.parse(s.slice(obj, objE + 1)); } catch {} }
+  const arr = s.indexOf('['), arrE = s.lastIndexOf(']');
+  if (arr !== -1 && arrE > arr) { try { return JSON.parse(s.slice(arr, arrE + 1)); } catch {} }
+  parseFailureCounter.increment(agentName);
+  return null;
+}
+
+// ── Step 1: Generate Committee ─────────────────────────────────────────────
+
+const PSYCH_DIMENSIONS = [
+  'core desires',
+  'hidden fears',
+  'primary motivations',
+  'recurring frustrations',
+  'unfulfilled dreams',
+  'identity tensions',
+  'avoidance patterns',
+];
 
 /**
- * Deduplicates insights by fuzzy key, ranks by confidence + novelty (lens diversity).
- * Tags high-confidence outputs as L2 seeds.
+ * Ask the LLM to generate a committee of agents tuned to this user's actual data.
+ * Returns an array of agent descriptors: { name, dimension, angle, rationale }
  */
+async function generateCommittee(kgSummary, llmClient, model) {
+  const prompt = `You are building a psychological probe committee for a user knowledge graph system.
+
+USER DATA SNAPSHOT:
+- Interests (by weight): ${kgSummary.interests.map(i => `${i.topic}(${i.weight?.toFixed(2)})`).join(', ') || 'none yet'}
+- Top engaged topics: ${kgSummary.topTopics.map(t => `${t.topic}(+${t.up}/-${t.down})`).join(', ') || 'none yet'}
+- Known beliefs: ${kgSummary.beliefs.map(b => b.topic || b.content || JSON.stringify(b)).slice(0,8).join(', ') || 'none yet'}
+- Identity signals: ${kgSummary.identities.map(i => i.label || i.type || JSON.stringify(i)).slice(0,6).join(', ') || 'none yet'}
+- History events: ${kgSummary.historySize} real interactions recorded
+
+AVAILABLE PSYCHOLOGICAL DIMENSIONS:
+${PSYCH_DIMENSIONS.map((d, i) => `${i + 1}. ${d}`).join('\n')}
+
+Generate a committee of 5-6 agents. Each agent specialises in ONE psychological dimension, and their angle should be specifically calibrated to what we see in this user's data — not generic.
+
+For each agent decide:
+- Which dimension resonates most with this user's apparent patterns
+- What specific angle to probe given what we already know
+- Why this angle matters for THIS specific user (1 sentence)
+
+Respond with JSON array only:
+[
+  {
+    "name": "AgentName",
+    "dimension": "one of the dimensions above",
+    "angle": "specific angle tailored to this user's data",
+    "rationale": "why this angle for this user"
+  }
+]`;
+
+  try {
+    const res = await llmClient.messages.create({
+      model,
+      max_tokens: 1000,
+      messages: [{ role: 'user', content: prompt }],
+    });
+    const text = res.content?.[0]?.text || res.content || '';
+    const committee = _parseJSON(text, 'committee-generator');
+    if (Array.isArray(committee) && committee.length > 0) return committee;
+  } catch (err) {
+    console.error('[InsightSwarm] committee generation failed:', err.message);
+  }
+
+  // Fallback: generic committee if LLM fails
+  return PSYCH_DIMENSIONS.slice(0, 5).map((dim, i) => ({
+    name: `Agent${i + 1}`,
+    dimension: dim,
+    angle: `Explore ${dim} patterns from available data`,
+    rationale: 'fallback agent',
+  }));
+}
+
+// ── Step 2: Run Each Agent ─────────────────────────────────────────────────
+
+/**
+ * Each agent receives the KG summary and its specific psychological brief.
+ * It returns 3-5 insights, each containing a probing question grounded in real data.
+ */
+async function runAgent(agent, kgSummary, llmClient, model) {
+  const dataContext = buildDataContext(kgSummary);
+
+  const prompt = `You are ${agent.name}, a psychological probe agent.
+
+YOUR DIMENSION: ${agent.dimension}
+YOUR ANGLE: ${agent.angle}
+YOUR BRIEF: ${agent.rationale}
+
+USER DATA:
+${dataContext}
+
+Your job: generate 3-5 insights that DEEPEN UNDERSTANDING of this user's "${agent.dimension}".
+
+Each insight must:
+1. Be grounded in SPECIFIC data points from the user data above (quote topics, weights, patterns)
+2. Identify a gap, tension, or unexplored pattern
+3. Include a probing QUESTION that, if answered, would significantly enrich the model
+4. NOT be generic — must reference something specific to this user
+
+The questions should feel like they come from someone who has studied this person —
+not a generic psychology survey.
+
+Respond with JSON array only:
+[
+  {
+    "insight": "Observation grounded in specific data (1-2 sentences)",
+    "question": "The probing question to ask the user",
+    "confidence": 0.0-1.0,
+    "data_refs": ["specific data point 1", "specific data point 2"]
+  }
+]`;
+
+  try {
+    const res = await llmClient.messages.create({
+      model,
+      max_tokens: 1200,
+      messages: [{ role: 'user', content: prompt }],
+    });
+    const text = res.content?.[0]?.text || res.content || '';
+    const raw = _parseJSON(text, agent.name);
+    if (!Array.isArray(raw)) return [];
+
+    return raw
+      .filter(r => r.insight && r.question)
+      .map(r => ({
+        insight:              r.insight,
+        question:             r.question,
+        confidence:           Math.min(1, Math.max(0, r.confidence || 0.7)),
+        supporting_facts:     (r.data_refs || []).map(d => `data:${d}`),
+        lens:                 agent.dimension.replace(/\s+/g, '_'),
+        agent:                agent.name,
+        // backward-compat aliases consumed by swarm.js
+        observation:          r.insight,
+        hypothesis:           r.insight,
+        derived_predictions:  [],
+        contradicting_signals:[],
+        source_layer:         'l1.5',
+        l2_seed:              (r.confidence || 0.7) >= 0.7,
+      }));
+  } catch (err) {
+    console.error(`[InsightSwarm] agent ${agent.name} failed:`, err.message);
+    return [];
+  }
+}
+
+// ── Data Context Builder ───────────────────────────────────────────────────
+
+function buildDataContext(kgSummary) {
+  const lines = [];
+
+  if (kgSummary.interests.length > 0) {
+    lines.push('INTERESTS (topic / weight / trend):');
+    kgSummary.interests.forEach(i => lines.push(`  - ${i.topic}: weight=${i.weight?.toFixed(2)} trend=${i.trend || 'stable'}`));
+  }
+
+  if (kgSummary.topTopics.length > 0) {
+    lines.push('ENGAGED TOPICS (from real interactions):');
+    kgSummary.topTopics.forEach(t => lines.push(`  - ${t.topic}: +${t.up} up / -${t.down} down / ${t.share} shared`));
+  }
+
+  if (kgSummary.beliefs.length > 0) {
+    lines.push('KNOWN BELIEFS:');
+    kgSummary.beliefs.slice(0, 10).forEach(b => {
+      const label = b.topic || b.content || JSON.stringify(b);
+      const strength = b.strength !== undefined ? ` (strength: ${b.strength?.toFixed(2)})` : '';
+      lines.push(`  - ${label}${strength}`);
+    });
+  }
+
+  if (kgSummary.identities.length > 0) {
+    lines.push('IDENTITY SIGNALS:');
+    kgSummary.identities.slice(0, 8).forEach(i => {
+      const label = i.label || i.type || JSON.stringify(i);
+      lines.push(`  - ${label}`);
+    });
+  }
+
+  if (kgSummary.dimPrefs.length > 0) {
+    lines.push('DIMENSIONAL PREFERENCES:');
+    kgSummary.dimPrefs.slice(0, 10).forEach(d => {
+      lines.push(`  - ${d.domain || '?'} / ${d.dimensionId || '?'}: strength=${d.strength?.toFixed(2)}`);
+    });
+  }
+
+  lines.push(`HISTORY SIZE: ${kgSummary.historySize} real interactions`);
+
+  if (Object.keys(kgSummary.context || {}).length > 0) {
+    lines.push('CONTEXT: ' + JSON.stringify(kgSummary.context));
+  }
+
+  return lines.join('\n') || '(No data yet — user is new to the system)';
+}
+
+// ── Aggregator ─────────────────────────────────────────────────────────────
+
 function aggregate(rawInsights) {
-  // Simple dedup: if two insights share the same first 60 chars, keep the higher confidence one
+  // Dedup on insight prefix
   const seen = new Map();
   for (const ins of rawInsights) {
     const key = ins.insight.slice(0, 60).toLowerCase().replace(/\s+/g, ' ');
     const existing = seen.get(key);
-    if (!existing || ins.confidence > existing.confidence) {
-      seen.set(key, ins);
-    }
+    if (!existing || ins.confidence > existing.confidence) seen.set(key, ins);
   }
 
   const deduped = [...seen.values()];
 
-  // Boost score for cross-lens diversity (reward lenses not yet well-represented)
+  // Reward lens diversity
   const lensCount = {};
   for (const ins of deduped) lensCount[ins.lens] = (lensCount[ins.lens] || 0) + 1;
 
-  const scored = deduped.map(ins => ({
-    ...ins,
-    _rank: ins.confidence + (1 / (lensCount[ins.lens] || 1)) * 0.05,
-    l2_seed: ins.confidence >= 0.7
-  }));
-
-  scored.sort((a, b) => b._rank - a._rank);
-
-  // Remove internal rank helper before returning.
-  // Add swarm.js consumer aliases (B3 fix — schema bridge).
-  return scored.map(({ _rank, ...rest }) => ({
-    ...rest,
-    observation:           rest.insight,
-    hypothesis:            rest.insight,
-    derived_predictions:   [],
-    contradicting_signals: rest.lens === 'contradiction' ? (rest.supporting_facts || []) : [],
-    source_layer:          'l1.5',
-  }));
+  return deduped
+    .map(ins => ({ ...ins, _rank: ins.confidence + (1 / (lensCount[ins.lens] || 1)) * 0.05 }))
+    .sort((a, b) => b._rank - a._rank)
+    .map(({ _rank, ...rest }) => rest);
 }
 
-// ─── PUBLIC API ───────────────────────────────────────────────────────────
+// ── Public API ─────────────────────────────────────────────────────────────
 
 /**
- * Run the L1.5 Insight Mining Swarm.
- *
- * @param {import('./kg.js').KnowledgeGraph} kg - Loaded KG instance
- * @returns {Promise<Insight[]>} Insights sorted by confidence descending
- */
-export async function runInsightSwarm(kg) {
-  const facts = getL1Facts(kg);
-
-  // Run all agents in parallel
-  const [
-    contradictions,
-    temporalDrifts,
-    correlations,
-    blindSpots,
-    intensities
-  ] = await Promise.all([
-    Promise.resolve(runContradictionAgent(facts)),
-    Promise.resolve(runTemporalDriftAgent(facts)),
-    Promise.resolve(runCorrelationAgent(facts)),
-    Promise.resolve(runBlindSpotAgent(facts)),
-    Promise.resolve(runIntensityAgent(facts))
-  ]);
-
-  const all = [
-    ...contradictions,
-    ...temporalDrifts,
-    ...correlations,
-    ...blindSpots,
-    ...intensities
-  ];
-
-  return aggregate(all);
-}
-
-/**
- * Get only L2-seed insights (confidence >= 0.7).
+ * Run the dynamic psychological probe committee against a KG.
  *
  * @param {import('./kg.js').KnowledgeGraph} kg
+ * @param {Object} [opts]
+ * @param {Object} [opts.llmClient]  - Pre-built LLM client (default: from env)
+ * @param {string} [opts.model]      - Model override
  * @returns {Promise<Insight[]>}
  */
-export async function getL2Seeds(kg) {
-  const insights = await runInsightSwarm(kg);
+export async function runInsightSwarm(kg, opts = {}) {
+  const llmClient = opts.llmClient || createLLMClient();
+  const model     = opts.model || llmClient.defaultModel('heavy');
+
+  const kgSummary = extractKGSummary(kg);
+
+  // Generate committee tailored to this user's data
+  const committee = await generateCommittee(kgSummary, llmClient, model);
+
+  // Run agents sequentially — self-hosted single-GPU servers can't handle parallel requests
+  const agentResults = [];
+  for (const agent of committee) {
+    agentResults.push(await runAgent(agent, kgSummary, llmClient, model));
+  }
+
+  return aggregate(agentResults.flat());
+}
+
+/**
+ * Return only L2-seed insights (confidence >= 0.7).
+ *
+ * @param {import('./kg.js').KnowledgeGraph} kg
+ * @param {Object} [opts]
+ * @returns {Promise<Insight[]>}
+ */
+export async function getL2Seeds(kg, opts = {}) {
+  const insights = await runInsightSwarm(kg, opts);
   return insights.filter(i => i.l2_seed);
 }

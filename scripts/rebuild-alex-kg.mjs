@@ -35,7 +35,12 @@ const KG_PATH = '/Users/aleksandrshrestha/.openclaw/workspace/data/marble/alex.j
 const DEEPSEEK_KEY = process.env.DEEPSEEK_API_KEY;
 if (!DEEPSEEK_KEY) { console.error('DEEPSEEK_API_KEY not set'); process.exit(1); }
 
-const client = new OpenAI({ apiKey: DEEPSEEK_KEY, baseURL: 'https://api.deepseek.com' });
+const DEEPSEEK_BASE = process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com';
+const client = new OpenAI({
+  apiKey: 'n/a',
+  baseURL: DEEPSEEK_BASE,
+  defaultHeaders: { 'x-api-key': DEEPSEEK_KEY },
+});
 
 // ── Real data sources ──────────────────────────────────────────────────────
 
@@ -99,7 +104,7 @@ async function synthesiseKG() {
   console.log('[rebuild-alex-kg] Synthesising beliefs from real data via DeepSeek...');
 
   const res = await client.chat.completions.create({
-    model: 'deepseek-chat',
+    model: 'deepseek-r1:14b',
     max_tokens: 3000,
     messages: [{
       role: 'user',

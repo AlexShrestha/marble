@@ -25,6 +25,9 @@ export class InvestigativeCommittee {
     this.llmCall = llmCall;
     this.maxRounds = opts.maxRounds || 5;
     this.maxQuestionsPerRound = opts.maxQuestionsPerRound || 6;
+    // Optional embeddings provider forwarded to kg.semanticSearch() — useful for
+    // testing with mock embeddings or when using a non-default provider.
+    this._embeddingsProvider = opts.embeddingsProvider || null;
 
     // Registered data sources: Map<name, async (query) => string[]>
     this._sources = new Map();
@@ -89,7 +92,10 @@ Example format: ["Why does this person run?", "What is driving their interest in
    * @returns {Promise<string|null>}
    */
   async answerQuestion(question) {
-    if (this._sources.size === 0) return null;
+    const hasKG = this.kg &&
+      typeof this.kg.semanticSearch === 'function' &&
+      this.kg._vectorIndex?.size > 0;
+    if (this._sources.size === 0 && !hasKG) return null;
 
     // Step 1 — generate evidence-seeking search queries
     const queryPrompt = `You are building a user understanding system. You have this question about a user:
@@ -111,8 +117,22 @@ Example: ["run distance logs", "marathon newsletter", "training frequency", "wee
       evidenceQueries.push(question);
     }
 
-    // Step 2 — search all sources with evidence queries
+    // Step 2 — semantic search on KG first (finds related nodes even without exact keyword match)
     const snippets = [];
+    if (this.kg && typeof this.kg.semanticSearch === 'function' && this.kg._vectorIndex?.size > 0) {
+      for (const query of evidenceQueries) {
+        try {
+          const kgResults = await this.kg.semanticSearch(query, 5, this._embeddingsProvider);
+          for (const result of kgResults) {
+            snippets.push(`[KG:${result.type}] ${result.text}`);
+          }
+        } catch {
+          // KG search failure is non-fatal
+        }
+      }
+    }
+
+    // Step 3 — supplement with external data sources
     for (const [, searchFn] of this._sources) {
       for (const query of evidenceQueries) {
         try {
@@ -126,7 +146,7 @@ Example: ["run distance logs", "marathon newsletter", "training frequency", "wee
 
     if (snippets.length === 0) return null;
 
-    // Step 3 — infer answer from indirect evidence
+    // Step 4 — infer answer from indirect evidence
     const context = snippets.slice(0, 12).join('\n---\n');
     const inferPrompt = `Question: "${question}"
 
@@ -197,6 +217,27 @@ If the signals are insufficient to draw a reasonable inference, return exactly: 
       gaps: [...this._gaps],
       rounds
     };
+  }
+
+  /**
+   * Score a story against a KnowledgeGraph.
+   * All weights are derived from the KG — no hardcoded values.
+   *
+   * @param {Object} story - Story object with topics[] array
+   * @param {Object} [kg]  - KnowledgeGraph instance (defaults to this.kg)
+   * @returns {number} Relevance score in [0, 1]
+   */
+  scoreAgainstKG(story, kg) {
+    const graph = kg ?? this.kg;
+    const topics = story.topics || [];
+
+    if (topics.length === 0) return graph.getInterestWeight('general');
+
+    const weights = topics.map(t => graph.getInterestWeight(t));
+    const nonZero = weights.filter(w => w > 0);
+    if (nonZero.length === 0) return graph.getInterestWeight('general');
+
+    return nonZero.reduce((sum, w) => sum + w, 0) / nonZero.length;
   }
 
   /**

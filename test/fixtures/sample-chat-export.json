@@ -1,0 +1,65 @@
+{
+  "conversations": [
+    {
+      "title": "Career and life discussion",
+      "mapping": {
+        "msg-1": {
+          "message": {
+            "role": "user",
+            "content": {
+              "parts": ["I'm a software engineer with 8 years of experience, mostly in backend systems. I've been thinking about transitioning into product management."]
+            }
+          }
+        },
+        "msg-2": {
+          "message": {
+            "role": "assistant",
+            "content": {
+              "parts": ["That's an interesting transition! What draws you to product management?"]
+            }
+          }
+        },
+        "msg-3": {
+          "message": {
+            "role": "user",
+            "content": {
+              "parts": ["I love the technical side but I find myself more energized when I'm talking to users and figuring out what to build. I believe the best products come from deeply understanding user pain points, not from following feature roadmaps."]
+            }
+          }
+        },
+        "msg-4": {
+          "message": {
+            "role": "assistant",
+            "content": {
+              "parts": ["That's a great philosophy. User empathy is crucial in PM work."]
+            }
+          }
+        },
+        "msg-5": {
+          "message": {
+            "role": "user",
+            "content": {
+              "parts": ["Yeah, and honestly I prefer working at startups over big tech. The pace is better and my work has more visible impact. I've been at Google and Amazon before and felt like a small cog."]
+            }
+          }
+        },
+        "msg-6": {
+          "message": {
+            "role": "user",
+            "content": {
+              "parts": ["I also strongly prefer async communication over meetings. I think most meetings could be emails or docs. Deep work time is sacred to me."]
+            }
+          }
+        },
+        "msg-7": {
+          "message": {
+            "role": "user",
+            "content": {
+              "parts": ["One thing I know for sure is that I want to build something in the health tech space eventually. I'm passionate about mental health tooling — it's underfunded and overlooked."]
+            }
+          }
+        }
+      }
+    }
+  ]
+}

@@ -13,6 +13,7 @@
 
 import { readFile, writeFile } from 'fs/promises';
 import { extractEntityAttributes } from './entity-extractor.js';
+import { embeddings as defaultEmbeddings } from './embeddings.js';
 
 export class KnowledgeGraph {
   constructor(dataPath) {
@@ -22,6 +23,9 @@ export class KnowledgeGraph {
     this._topicInsightEngine = null;     // TopicInsightEngine for LLM-powered enrichment
     this._dimensionalPreferences = [];   // DimensionalPreference[] tracking
     this._lastInsightResult = null;      // Last enrichment result for debugging
+    // Native vector index: node_id → Float32Array embedding
+    this._vectorIndex = new Map();
+    this._vectorIndexMeta = new Map();   // node_id → { type, node, text }
   }
 
   /**
@@ -439,6 +443,107 @@ export class KnowledgeGraph {
     return this._lastInsightResult;
   }
 
+  // ── Native Vector Index ───────────────────────────────
+
+  /**
+   * Add a single node to the in-process vector index.
+   * @param {string} nodeId - Unique node identifier
+   * @param {Float32Array} embedding - Pre-computed embedding vector
+   * @param {Object} meta - Node metadata { type, node, text }
+   */
+  indexNode(nodeId, embedding, meta) {
+    this._vectorIndex.set(nodeId, embedding);
+    this._vectorIndexMeta.set(nodeId, meta);
+  }
+
+  /**
+   * Build the vector index from all current KG nodes (interests, beliefs, preferences, identities).
+   * Embeds each node's text representation and stores it in the in-memory index.
+   * @param {Object} [provider] - Embeddings provider (defaults to module-level singleton)
+   * @returns {Promise<number>} Number of nodes indexed
+   */
+  async buildVectorIndex(provider = null) {
+    const emb = provider || defaultEmbeddings;
+    this._vectorIndex.clear();
+    this._vectorIndexMeta.clear();
+
+    const entries = [];  // { nodeId, text, type, node }
+
+    for (const [i, interest] of (this.user.interests || []).entries()) {
+      entries.push({
+        nodeId: `interest:${i}`,
+        text: `interest in ${interest.topic}`,
+        type: 'interest',
+        node: interest,
+      });
+    }
+
+    for (const [i, belief] of (this.user.beliefs || []).entries()) {
+      const text = belief.claim
+        ? `belief: ${belief.topic} - ${belief.claim}`
+        : `belief: ${belief.topic}`;
+      entries.push({ nodeId: `belief:${i}`, text, type: 'belief', node: belief });
+    }
+
+    for (const [i, pref] of (this.user.preferences || []).entries()) {
+      entries.push({
+        nodeId: `preference:${i}`,
+        text: `preference: ${pref.type} ${pref.description}`,
+        type: 'preference',
+        node: pref,
+      });
+    }
+
+    for (const [i, identity] of (this.user.identities || []).entries()) {
+      const text = identity.context
+        ? `identity: ${identity.role} ${identity.context}`
+        : `identity: ${identity.role}`;
+      entries.push({ nodeId: `identity:${i}`, text, type: 'identity', node: identity });
+    }
+
+    if (entries.length === 0) return 0;
+
+    const texts = entries.map(e => e.text);
+    const vecs = await emb.embedBatch(texts);
+
+    for (let i = 0; i < entries.length; i++) {
+      const { nodeId, text, type, node } = entries[i];
+      if (vecs[i] && vecs[i].length > 0) {
+        this.indexNode(nodeId, vecs[i], { type, node, text });
+      }
+    }
+
+    return this._vectorIndex.size;
+  }
+
+  /**
+   * Semantic search over indexed KG nodes using cosine similarity.
+   * Returns the top-K nodes most similar to the query.
+   * @param {string} query - Free-text query
+   * @param {number} [topK=5] - Number of results to return
+   * @param {Object} [provider] - Embeddings provider (defaults to module-level singleton)
+   * @returns {Promise<Array<{nodeId, similarity, type, node, text}>>}
+   */
+  async semanticSearch(query, topK = 5, provider = null) {
+    if (this._vectorIndex.size === 0) return [];
+
+    const emb = provider || defaultEmbeddings;
+    const queryVec = await emb.embed(query);
+
+    if (!queryVec || queryVec.length === 0) return [];
+
+    const results = [];
+    for (const [nodeId, nodeVec] of this._vectorIndex) {
+      if (nodeVec.length !== queryVec.length) continue;
+      const similarity = this.#cosineSimilarity(queryVec, nodeVec);
+      const meta = this._vectorIndexMeta.get(nodeId);
+      results.push({ nodeId, similarity, ...meta });
+    }
+
+    results.sort((a, b) => b.similarity - a.similarity);
+    return results.slice(0, topK);
+  }
+
   /**
    * Get tracked dimensional preferences
    * @param {string} [domain] - Optional domain filter
@@ -450,6 +555,18 @@ export class KnowledgeGraph {
   }
 
   // ── Private ──────────────────────────────────────────
+
+  #cosineSimilarity(a, b) {
+    let dot = 0, normA = 0, normB = 0;
+    for (let i = 0; i < a.length; i++) {
+      dot += a[i] * b[i];
+      normA += a[i] * a[i];
+      normB += b[i] * b[i];
+    }
+    normA = Math.sqrt(normA);
+    normB = Math.sqrt(normB);
+    return normA === 0 || normB === 0 ? 0 : dot / (normA * normB);
+  }
 
   #applyDecay(interest) {
     const daysSinceBoost = (Date.now() - new Date(interest.last_boost).getTime()) / 86400000;

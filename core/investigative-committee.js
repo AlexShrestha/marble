@@ -79,35 +79,65 @@ Example format: ["Why does this person run?", "What is driving their interest in
   /**
    * Attempt to answer a question using registered data sources.
    *
+   * Answers are almost never direct. For "Is this person an ultra runner?",
+   * the data source won't return that string — but it might contain run
+   * distances, training frequency, newsletter subscriptions, or other indirect
+   * signals. So we first decompose the question into evidence-seeking search
+   * queries, then infer from whatever indirect signals we collect.
+   *
    * @param {string} question
    * @returns {Promise<string|null>}
    */
   async answerQuestion(question) {
     if (this._sources.size === 0) return null;
 
-    // Gather search results from all sources
+    // Step 1 — generate evidence-seeking search queries
+    const queryPrompt = `You are building a user understanding system. You have this question about a user:
+"${question}"
+
+The data sources available will NOT directly answer this question. You need to find indirect evidence.
+
+Generate up to 5 short search queries that would surface indirect signals relevant to answering this question.
+Think about: behavioral data, subscriptions, frequency metrics, content interactions, stated preferences, demographics.
+
+Return ONLY a JSON array of short search query strings. No explanation.
+Example: ["run distance logs", "marathon newsletter", "training frequency", "weekly mileage"]`;
+
+    const rawQueries = await this.llmCall(queryPrompt);
+    const evidenceQueries = this._parseJSONArray(rawQueries);
+
+    if (evidenceQueries.length === 0) {
+      // Fallback: use question directly as last resort
+      evidenceQueries.push(question);
+    }
+
+    // Step 2 — search all sources with evidence queries
     const snippets = [];
     for (const [, searchFn] of this._sources) {
-      try {
-        const results = await searchFn(question);
-        if (Array.isArray(results)) snippets.push(...results);
-      } catch {
-        // Source failure is non-fatal
+      for (const query of evidenceQueries) {
+        try {
+          const results = await searchFn(query);
+          if (Array.isArray(results)) snippets.push(...results);
+        } catch {
+          // Source failure is non-fatal
+        }
       }
     }
 
     if (snippets.length === 0) return null;
 
-    const context = snippets.slice(0, 8).join('\n---\n');
-    const prompt = `Question: "${question}"
+    // Step 3 — infer answer from indirect evidence
+    const context = snippets.slice(0, 12).join('\n---\n');
+    const inferPrompt = `Question: "${question}"
 
-Available data:
+The following are indirect signals collected from available data — not direct answers:
 ${context}
 
-Answer the question concisely based only on the data above.
-If the data does not contain a meaningful answer, return exactly: null`;
+Based on these signals, infer the most likely answer to the question.
+Be explicit about what signals led to your conclusion.
+If the signals are insufficient to draw a reasonable inference, return exactly: null`;
 
-    const answer = await this.llmCall(prompt);
+    const answer = await this.llmCall(inferPrompt);
     const trimmed = answer.trim();
     if (trimmed === 'null' || trimmed === '') return null;
     return trimmed;

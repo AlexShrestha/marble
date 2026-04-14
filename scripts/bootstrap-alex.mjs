@@ -17,7 +17,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { glob } from 'node:fs/promises';
+// glob requires Node 22+; use readdirSync fallback for Node 20
+const glob = async (pattern) => {
+  const dir = path.dirname(pattern.replace(/\*.*/, ''));
+  if (!fs.existsSync(dir)) return [];
+  const ext = pattern.match(/\*(\.\w+)$/)?.[1] || '';
+  return fs.readdirSync(dir).filter(f => !ext || f.endsWith(ext)).map(f => path.join(dir, f));
+};
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');

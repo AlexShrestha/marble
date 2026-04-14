@@ -114,7 +114,9 @@ function parseChatGPTFormat(data) {
     if (conv.mapping) {
       for (const node of Object.values(conv.mapping)) {
         const msg = node.message;
-        if (!msg || !msg.role || msg.role === 'system') continue;
+        if (!msg) continue;
+        const role = msg.role || msg.author?.role;
+        if (!role || role === 'system') continue;
 
         let text = '';
         if (typeof msg.content === 'string') {
@@ -124,7 +126,7 @@ function parseChatGPTFormat(data) {
         }
 
         if (text.trim()) {
-          messages.push({ role: msg.role, content: text.trim() });
+          messages.push({ role, content: text.trim() });
         }
       }
     } else if (conv.chat_messages) {

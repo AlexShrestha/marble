@@ -2,7 +2,7 @@
  * test-swarm.js — Tests for the 5-agent relationship-aware swarm
  */
 
-import { swarmScore, swarmRank, getAgentConfig, AGENT_WEIGHTS, buildSwarmContext } from './swarm.js';
+import { swarmScore, swarmRank, getAgentConfig, AGENT_WEIGHTS, buildSwarmContext } from '../core/swarm.js';
 import { MarbleKG } from '../kg.js';
 
 // ─── TEST HELPERS ──────────────────────────────────────────────────────────

@@ -4,9 +4,9 @@
  * Tests user-item interaction matrix, similarity computation, and CF scoring.
  */
 
-import { CollaborativeFilter } from './collaborative-filter.js';
-import { Scorer } from './scorer.js';
-import { KnowledgeGraph } from './kg.js';
+import { CollaborativeFilter } from '../core/collaborative-filter.js';
+import { Scorer } from '../core/scorer.js';
+import { KnowledgeGraph } from '../core/kg.js';
 
 async function testCollaborativeFilter() {
   console.log('🧪 Testing Collaborative Filter...\n');

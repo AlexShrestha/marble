@@ -54,12 +54,13 @@ export class RapidFeedbackEngine {
     if (!slateReactions?.length) return { inferences: [], revelations: [], dimensionUpdates: {} };
 
     // Step 1: Separate into engaged vs rejected
-    const engaged = slateReactions.filter(r => ['up', 'share'].includes(r.reaction));
-    const rejected = slateReactions.filter(r => ['down', 'skip'].includes(r.reaction));
-    const shared = slateReactions.filter(r => r.reaction === 'share');
+    const engaged = slateReactions.map(r => ({ story: r.story || r.item, reaction: r.reaction })).filter(r => ['up', 'share'].includes(r.reaction));
+    const rejected = slateReactions.map(r => ({ story: r.story || r.item, reaction: r.reaction })).filter(r => ['down', 'skip'].includes(r.reaction));
+    const shared = slateReactions.map(r => ({ story: r.story || r.item, reaction: r.reaction })).filter(r => r.reaction === 'share');
 
     // Step 2: Record all reactions in KG
-    for (const { story, reaction } of slateReactions) {
+    const normalized = slateReactions.map(r => ({ story: r.story || r.item, reaction: r.reaction }));
+    for (const { story, reaction } of normalized) {
       for (const topic of story.topics || []) {
         if (['up', 'share'].includes(reaction)) {
           this.kg.boostInterest(topic, reaction === 'share' ? 0.2 : 0.1);
@@ -244,7 +245,9 @@ Rules:
   _computeDimensionUpdates(slateReactions) {
     const updates = {};
 
-    for (const { story, reaction } of slateReactions) {
+    for (const r of slateReactions) {
+      const story = r.story || r.item;
+      const reaction = r.reaction;
       const wasEngaged = ['up', 'share'].includes(reaction);
       const scores = story._marble_scores || story.agent_scores || {};
 

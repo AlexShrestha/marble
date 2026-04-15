@@ -8,8 +8,8 @@
  * 4. Insight-swarm alias compatibility (observation, hypothesis, etc)
  */
 
-import { TopicInsightEngine, GapSimulator } from './topic-insight-engine.js';
-import { KnowledgeGraph } from './kg.js';
+import { TopicInsightEngine, GapSimulator } from '../core/topic-insight-engine.js';
+import { KnowledgeGraph } from '../core/kg.js';
 
 // Mock LLM call for testing
 const mockLLM = async (prompt) => {

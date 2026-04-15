@@ -2,7 +2,7 @@
  * Final integration test to verify CF system works with realistic data
  */
 
-import { Scorer } from './scorer.js';
+import { Scorer } from '../core/scorer.js';
 import { globalCollaborativeFilter } from '../collaborative-filter.js';
 
 async function testCFIntegration() {

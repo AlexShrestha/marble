@@ -8,8 +8,8 @@
  * - Second-order effects populated
  */
 
-import { KnowledgeGraph } from './kg.js';
-import { InferenceEngine } from './inference-engine.js';
+import { KnowledgeGraph } from '../core/kg.js';
+import { InferenceEngine } from '../core/inference-engine.js';
 
 async function test() {
   console.log('=== L2 Inference Engine Test ===\n');

@@ -234,6 +234,47 @@ Would this user engage positively with this item? Answer with ONLY "yes" or "no"
   }
 
   /**
+   * Score an item through all active clones and return weighted consensus.
+   * Each clone applies its kgOverrides, predicts engagement, weighted by fitness.
+   *
+   * @param {Object} item - Item to score (needs title, topics, etc.)
+   * @param {Array} [clones] - Override active clones list
+   * @returns {Promise<number>} Consensus score 0-1
+   */
+  async predictConsensus(item, clones = null) {
+    const activeClones = clones || this.kg.getActiveClones();
+    if (activeClones.length === 0) return 0;
+
+    let weightedSum = 0;
+    let fitnessSum = 0;
+
+    for (const clone of activeClones) {
+      const overrideDesc = this._describeOverrides(clone.kgOverrides);
+
+      const prompt = `A user with the following profile:
+${overrideDesc}
+
+Was shown this item: ${JSON.stringify({ title: item.title, domain: item.domain, tags: item.tags, topics: item.topics })}
+
+Would this user engage positively with this item? Answer with ONLY "yes" or "no".`;
+
+      let score = 0.5;
+      try {
+        const answer = (await this.llmCall(prompt)).trim().toLowerCase();
+        score = answer.startsWith('yes') ? 0.8 : 0.2;
+      } catch {
+        // LLM failure — use neutral score
+      }
+
+      const fitness = clone.confidence || 0.5;
+      weightedSum += score * fitness;
+      fitnessSum += fitness;
+    }
+
+    return fitnessSum > 0 ? weightedSum / fitnessSum : 0;
+  }
+
+  /**
    * Get population health stats.
    */
   getPopulationStats() {

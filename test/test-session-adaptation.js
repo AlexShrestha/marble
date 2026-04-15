@@ -7,8 +7,8 @@
  */
 
 import { MarbleSignalProcessor } from '../signals.js';
-import { Scorer } from './scorer.js';
-import { KnowledgeGraph } from './kg.js';
+import { Scorer } from '../core/scorer.js';
+import { KnowledgeGraph } from '../core/kg.js';
 
 async function testSessionAdaptation() {
   console.log('🧪 Testing Within-Session Adaptation...\n');

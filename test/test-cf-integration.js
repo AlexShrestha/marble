@@ -4,7 +4,7 @@
  */
 
 import { CollaborativeFilter } from '../collaborative-filter.js';
-import { Scorer } from './scorer.js';
+import { Scorer } from '../core/scorer.js';
 
 // Mock KG
 class MockKG {

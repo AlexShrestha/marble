@@ -3,7 +3,7 @@
  * Shows how low users = low CF weight, more users = higher CF weight
  */
 
-import { CollaborativeFilter } from './collaborative-filter.js';
+import { CollaborativeFilter } from '../core/collaborative-filter.js';
 
 async function testCFWeighting() {
   console.log('🧪 Testing CF Signal Weighting by User Count...\n');

@@ -2,10 +2,10 @@
  * Test use case profiles for survey_opinion and preference_ranking
  */
 
-import { Scorer } from './scorer.js';
-import { swarmRank } from './swarm.js';
-import { KnowledgeGraph } from './kg.js';
-import { USE_CASE_CONFIGS } from './types.js';
+import { Scorer } from '../core/scorer.js';
+import { swarmRank } from '../core/swarm.js';
+import { KnowledgeGraph } from '../core/kg.js';
+import { USE_CASE_CONFIGS } from '../core/types.js';
 
 // Test data
 const testStories = [

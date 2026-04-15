@@ -4,7 +4,7 @@
  */
 
 import { MetricDrivenScoringEngine } from '../enterprise/metric-driven-scoring-engine.js';
-import { USE_CASE_PROFILES } from './use-case-profiles.js';
+import { USE_CASE_PROFILES } from '../core/use-case-profiles.js';
 
 async function testMetricDrivenScoringEngine() {
   console.log('🧪 Testing MetricDrivenScoringEngine...');

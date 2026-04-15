@@ -4,10 +4,10 @@
  */
 
 import { MetricDrivenScoringEngine } from '../enterprise/metric-driven-scoring-engine.js';
-import { CalibrationAPI, EXAMPLE_CONFIGS } from './calibration-api.js';
-import { createProfileConfig, USE_CASE_PROFILES } from './use-case-profiles.js';
-import { Scorer } from './scorer.js';
-import { KnowledgeGraph } from './kg.js';
+import { CalibrationAPI, EXAMPLE_CONFIGS } from '../core/calibration-api.js';
+import { createProfileConfig, USE_CASE_PROFILES } from '../core/use-case-profiles.js';
+import { Scorer } from '../core/scorer.js';
+import { KnowledgeGraph } from '../core/kg.js';
 
 // Mock test data
 const mockStories = [

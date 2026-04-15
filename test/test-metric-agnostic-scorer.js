@@ -5,8 +5,8 @@
  * calibration API, and backward compatibility.
  */
 
-import { MetricConfig, MetricAgnosticScoringEngine, METRIC_DEFINITIONS } from './metric-agnostic-scorer.js';
-import { CalibrationAPI, EXAMPLE_CONFIGS, EXAMPLE_OUTCOME_DATA } from './calibration-api.js';
+import { MetricConfig, MetricAgnosticScoringEngine, METRIC_DEFINITIONS } from '../core/metric-agnostic-scorer.js';
+import { CalibrationAPI, EXAMPLE_CONFIGS, EXAMPLE_OUTCOME_DATA } from '../core/calibration-api.js';
 
 async function runTests() {
   console.log('🧪 Testing Metric-Agnostic Scoring Engine\n');
@@ -413,7 +413,7 @@ export function demonstrateUsage() {
   console.log('\n🎯 Usage Example:');
   console.log(`
 // 1. Register your startup with target metrics
-import { calibrationAPI } from './calibration-api.js';
+import { calibrationAPI } from '../core/calibration-api.js';
 
 const myConfig = {
   startupId: 'my_startup',

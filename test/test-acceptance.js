@@ -3,9 +3,9 @@
  * Tests that rank(stories, { useCase: 'survey_opinion' }) uses correct weights
  */
 
-import { Scorer } from './scorer.js';
-import { swarmRank } from './swarm.js';
-import { USE_CASE_CONFIGS } from './types.js';
+import { Scorer } from '../core/scorer.js';
+import { swarmRank } from '../core/swarm.js';
+import { USE_CASE_CONFIGS } from '../core/types.js';
 
 // Test stories with different characteristics
 const testStories = [

@@ -10,8 +10,8 @@
  * - Integration with MarbleKG
  */
 
-import { InsightEngine } from './insight-engine.js';
-import { MarbleKG } from './kg.js';
+import { InsightEngine } from '../core/insight-engine.js';
+import { MarbleKG } from '../core/kg.js';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';

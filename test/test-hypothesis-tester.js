@@ -3,8 +3,8 @@
  * test-hypothesis-tester.js — Tests for Marble Hypothesis Testing Engine
  */
 
-import { HypothesisTester, bayesianUpdate } from './hypothesis-tester.js';
-import { MarbleKG } from './kg.js';
+import { HypothesisTester, bayesianUpdate } from '../core/hypothesis-tester.js';
+import { MarbleKG } from '../core/kg.js';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';

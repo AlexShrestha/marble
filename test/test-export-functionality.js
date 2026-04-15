@@ -3,8 +3,8 @@
  * Tests all export-related features in the metric-agnostic scoring system
  */
 
-import { MetricConfig, MetricAgnosticScoringEngine } from './metric-agnostic-scorer.js';
-import { CalibrationAPI } from './calibration-api.js';
+import { MetricConfig, MetricAgnosticScoringEngine } from '../core/metric-agnostic-scorer.js';
+import { CalibrationAPI } from '../core/calibration-api.js';
 
 async function testExportFunctionalities() {
   console.log('🧪 Testing Export Functionality Refinements\n');

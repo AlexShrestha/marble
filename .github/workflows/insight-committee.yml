@@ -10,6 +10,8 @@ jobs:
   insight-committee:
     name: Run psychological probe committee (DeepSeek)
     runs-on: ubuntu-latest
+    # Skip when DeepSeek secrets aren't configured (PRs from forks, server down)
+    if: ${{ secrets.DEEPSEEK_BASE_URL != '' }}
 
     steps:
       - uses: actions/checkout@v4

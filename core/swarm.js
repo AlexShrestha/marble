@@ -336,8 +336,8 @@ export class Swarm {
     this.clone = new Clone(kg);
     this.agents = [];
     this.options = {
-      mode: options.mode || 'fast', // 'fast' (heuristic) or 'deep' (LLM)
-      llm: options.llm || null,     // LLM function for deep mode
+      mode: options.mode || 'fast', // 'fast' (heuristic), 'deep' (LLM), or 'debate' (LLM + debate)
+      llm: options.llm || null,     // LLM function for deep/debate mode
       topN: options.topN || 10
     };
   }
@@ -359,16 +359,21 @@ export class Swarm {
     );
 
     // Step 3: Each agent evaluates independently
-    if (this.options.mode === 'deep' && this.options.llm) {
+    if ((this.options.mode === 'deep' || this.options.mode === 'debate') && this.options.llm) {
       await this.#deepEvaluation(stories);
     } else {
       this.#fastEvaluation(stories);
     }
 
-    // Step 4: Consensus — weighted vote across all agents
+    // Step 4: Debate round (if mode === 'debate')
+    if (this.options.mode === 'debate' && this.options.llm) {
+      await this.#debateRound(stories);
+    }
+
+    // Step 5: Consensus — weighted vote across all agents
     const consensus = this.#buildConsensus(stories);
 
-    // Step 5: Return top N with arc positions
+    // Step 6: Return top N with arc positions
     return consensus.slice(0, this.options.topN);
   }
 
@@ -436,6 +441,124 @@ export class Swarm {
     });
 
     await Promise.all(promises);
+  }
+
+  /**
+   * Debate round: agents see each other's picks and can challenge/revise.
+   *
+   * BettaFish-inspired: instead of just averaging scores, surface disagreements
+   * and let agents argue. A moderator synthesizes the final verdict.
+   *
+   * Only runs in 'debate' mode.
+   */
+  async #debateRound(stories) {
+    // Collect all agent picks into a readable summary
+    const lensKeys = Object.keys(AGENT_LENSES);
+    const agentSummaries = [];
+
+    for (let i = 0; i < this.agents.length; i++) {
+      const agent = this.agents[i];
+      const lens = AGENT_LENSES[lensKeys[i]];
+      const top5 = agent.advocate(5);
+
+      if (top5.length === 0) continue;
+
+      agentSummaries.push({
+        name: lens.name,
+        picks: top5.map(p => ({
+          title: p.story.title,
+          score: p.score,
+          reason: p.reason || '(no reason given)',
+          storyIndex: stories.indexOf(p.story),
+        })),
+      });
+    }
+
+    if (agentSummaries.length < 2) return; // need at least 2 agents to debate
+
+    // Find disagreements: stories where agents have very different scores
+    const storyAgentScores = new Map();
+    for (const summary of agentSummaries) {
+      for (const pick of summary.picks) {
+        if (!storyAgentScores.has(pick.storyIndex)) {
+          storyAgentScores.set(pick.storyIndex, []);
+        }
+        storyAgentScores.get(pick.storyIndex).push({
+          agent: summary.name,
+          score: pick.score,
+          reason: pick.reason,
+        });
+      }
+    }
+
+    // Find top disagreements (high score variance)
+    const disagreements = [];
+    for (const [storyIdx, agentScores] of storyAgentScores) {
+      if (agentScores.length < 2) continue;
+      const scores = agentScores.map(a => a.score);
+      const mean = scores.reduce((s, v) => s + v, 0) / scores.length;
+      const variance = scores.reduce((s, v) => s + (v - mean) ** 2, 0) / scores.length;
+      if (variance > 0.04) { // significant disagreement
+        disagreements.push({ storyIdx, agentScores, variance, story: stories[storyIdx] });
+      }
+    }
+
+    if (disagreements.length === 0) return; // agents agree, no debate needed
+
+    // Sort by disagreement magnitude
+    disagreements.sort((a, b) => b.variance - a.variance);
+    const topDisagreements = disagreements.slice(0, 5);
+
+    // Build debate prompt
+    const debateText = topDisagreements.map(d => {
+      const story = d.story;
+      const agents = d.agentScores.map(a => `  ${a.agent}: score=${a.score.toFixed(2)} — ${a.reason}`).join('\n');
+      return `STORY: "${story.title}"\n${agents}`;
+    }).join('\n\n');
+
+    const debatePrompt = `You are a moderator in a story curation debate. The agents below have scored these stories very differently.
+
+${this.clone.toPrompt()}
+
+DISAGREEMENTS:
+${debateText}
+
+For each disagreement:
+1. Identify which agent makes the stronger case for THIS specific user
+2. Determine a revised score (0.0-1.0) that accounts for both perspectives
+3. Explain what the debate reveals
+
+Return ONLY a JSON array:
+[{ "storyIndex": N, "revisedScore": 0.0-1.0, "winner": "AgentName", "insight": "what this debate reveals" }]`;
+
+    try {
+      const response = await this.options.llm(debatePrompt);
+      const parsed = _extractJSON(response, 'debate-moderator');
+      if (!parsed || !Array.isArray(parsed)) return;
+
+      // Apply debate revisions to agent picks
+      for (const revision of parsed) {
+        const storyIdx = revision.storyIndex;
+        if (storyIdx == null || !stories[storyIdx]) continue;
+
+        const story = stories[storyIdx];
+        const revisedScore = Math.max(0, Math.min(1, revision.revisedScore || 0.5));
+
+        // Apply revised score to all agents that picked this story
+        for (const agent of this.agents) {
+          const pick = agent.picks.find(p => p.story === story);
+          if (pick) {
+            // Blend: 60% original + 40% debated revision
+            pick.score = pick.score * 0.6 + revisedScore * 0.4;
+            if (revision.insight) {
+              pick.reason = (pick.reason || '') + ` [Debate: ${revision.insight}]`;
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.warn(`[Swarm] Debate round failed: ${err.message}. Proceeding with original scores.`);
+    }
   }
 
   /**
@@ -611,9 +734,9 @@ export function swarmScore(story, kg, opts = {}) {
   }
 
   // ── Sparse-content detection ─────────────────────────────────────────
-  // When content has < 40 words (e.g. MovieLens: title + genres only), the
+  // When content has < 40 words (e.g. sparse catalog: title + genres only), the
   // motivation agents cannot differentiate items — they have nothing to read.
-  // Empirically, on MovieLens u1.base the 60/40 blend hurt precision vs pure
+  // Empirically, on sparse catalog sparse datasets the 60/40 blend hurt precision vs pure
   // genre overlap because the 0.4 motivation weight diluted a clean genre signal
   // with near-random engagement scores. Fix: weight genre much higher on sparse
   // content so motivation noise does not drag down well-calibrated genre affinity.
@@ -814,7 +937,7 @@ function _hashKgSummary(kgSummary) {
  *              interest_anchors, interest_topics, positive_signals, negative_signals
  *
  * Checks BOTH text content AND structured fields (story.genres, story.year, story.director)
- * so the scorer works on sparse content like MovieLens items (title + genres only).
+ * so the scorer works on sparse content like sparse catalog items (title + genres only).
  */
 function _buildSpecScorer(spec) {
   return function specScorer(story, ctx) {
@@ -1140,7 +1263,7 @@ export async function explodeAgentQuestions(agent, contentSample, kgSummary, llm
   const agentSpec = typeof agent === 'string' ? { name: agent, motivation_frame: `${agent} lens` } : agent;
   const agentName = agentSpec.name || 'unknown';
 
-  // Content sparsity gate: when content has fewer than 40 words (e.g. MovieLens:
+  // Content sparsity gate: when content has fewer than 40 words (e.g. sparse catalog:
   // title + genres only), LLM question explosion cannot generate meaningful
   // questions — there is nothing to read. Fall through to direct structural
   // scoring instead.
@@ -1271,7 +1394,7 @@ Return ONLY a plain JSON array — no code fences, no markdown, no explanation b
  * Each exclusive_dimension maps to a different observable signal so that sibling
  * agents do NOT produce the same question for the same item. This is the fix for
  * the original bug where all agents asked identical genre/history questions,
- * causing massive cross-agent redundancy on MovieLens (sparse) content.
+ * causing massive cross-agent redundancy on sparse catalog (sparse) content.
  */
 function _sparseQuestionsForDimension(dim, contentGenres, allAnchors, negatives, history, kg) {
   const genreHit = contentGenres.some(g => allAnchors.includes(g));
@@ -1346,7 +1469,7 @@ function _sparseQuestionsForDimension(dim, contentGenres, allAnchors, negatives,
 }
 
 /**
- * Direct structural scoring for sparse content (< 40 words, e.g. MovieLens items).
+ * Direct structural scoring for sparse content (< 40 words, e.g. sparse catalog items).
  *
  * When content is title + genres only, LLM question explosion is meaningless:
  * there is nothing to read, so the LLM hallucinates answers. Instead, score

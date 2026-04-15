@@ -103,7 +103,7 @@ export const USE_CASE_PROFILES = {
       actionability: 0.00,
       source_trust: 0.05
     },
-    description: 'Optimize for MovieLens-style preference ranking',
+    description: 'Optimize for catalog-style preference ranking',
     performanceThreshold: 0.25,
     learningRate: 0.10
   },

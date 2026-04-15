@@ -443,6 +443,141 @@ export class KnowledgeGraph {
     return this._lastInsightResult;
   }
 
+  // ── Temporal Query Helpers ─────────────────────────────
+
+  /**
+   * Get a full snapshot of the user's state at a specific point in time.
+   * Returns beliefs, preferences, and identities that were active at `asOf`.
+   *
+   * @param {string} asOf - ISO date string
+   * @returns {Object} { beliefs, preferences, identities, timestamp }
+   */
+  getStateAt(asOf) {
+    return {
+      beliefs: this.getActiveBeliefs(asOf),
+      preferences: this.getActivePreferences(asOf),
+      identities: this.getActiveIdentities(asOf),
+      timestamp: asOf,
+    };
+  }
+
+  /**
+   * Invalidate a fact by setting its valid_to date.
+   * Works on beliefs, preferences, and identities.
+   *
+   * @param {string} type - 'belief' | 'preference' | 'identity'
+   * @param {string} topic - The topic/type/role to invalidate
+   * @param {string} [reason] - Why this fact was invalidated
+   * @returns {boolean} Whether a fact was invalidated
+   */
+  invalidateFact(type, topic, reason) {
+    const now = new Date().toISOString();
+    const topicLower = topic.toLowerCase();
+    let collection;
+
+    if (type === 'belief') collection = this.user.beliefs;
+    else if (type === 'preference') collection = this.user.preferences;
+    else if (type === 'identity') collection = this.user.identities;
+    else return false;
+
+    let invalidated = false;
+    for (const item of collection) {
+      const key = item.topic || item.type || item.role || '';
+      if (key.toLowerCase() === topicLower && !item.valid_to) {
+        item.valid_to = now;
+        item.invalidation_reason = reason || null;
+        invalidated = true;
+      }
+    }
+    return invalidated;
+  }
+
+  /**
+   * Get the history of a specific fact over time (all versions, including superseded).
+   *
+   * @param {string} type - 'belief' | 'preference' | 'identity'
+   * @param {string} topic - The topic/type/role
+   * @returns {Array} All versions sorted by valid_from ascending
+   */
+  getFactHistory(type, topic) {
+    const topicLower = topic.toLowerCase();
+    let collection;
+
+    if (type === 'belief') collection = this.user.beliefs;
+    else if (type === 'preference') collection = this.user.preferences;
+    else if (type === 'identity') collection = this.user.identities;
+    else return [];
+
+    return collection
+      .filter(item => {
+        const key = item.topic || item.type || item.role || '';
+        return key.toLowerCase() === topicLower;
+      })
+      .sort((a, b) => {
+        const aTime = a.valid_from ? new Date(a.valid_from).getTime() : 0;
+        const bTime = b.valid_from ? new Date(b.valid_from).getTime() : 0;
+        return aTime - bTime;
+      });
+  }
+
+  // ── Emotion Encoding ──────────────────────────────────
+
+  /**
+   * Add emotion tags to a KG node (belief, preference, or identity).
+   * Emotions use a universal vocabulary: joy, fear, trust, frustration,
+   * hope, anxiety, pride, shame, curiosity, boredom, anger, love,
+   * grief, wonder, peace.
+   *
+   * @param {string} type - 'belief' | 'preference' | 'identity'
+   * @param {string} topic - The topic/type/role to tag
+   * @param {string[]} emotions - Array of emotion codes
+   */
+  tagEmotions(type, topic, emotions) {
+    const topicLower = topic.toLowerCase();
+    let collection;
+
+    if (type === 'belief') collection = this.user.beliefs;
+    else if (type === 'preference') collection = this.user.preferences;
+    else if (type === 'identity') collection = this.user.identities;
+    else return;
+
+    for (const item of collection) {
+      const key = item.topic || item.type || item.role || '';
+      if (key.toLowerCase() === topicLower && !item.valid_to) {
+        item.emotions = [...new Set([...(item.emotions || []), ...emotions])];
+      }
+    }
+  }
+
+  /**
+   * Get all nodes tagged with a specific emotion.
+   *
+   * @param {string} emotion - Emotion code to search for
+   * @returns {Array<{ type: string, item: Object }>}
+   */
+  getByEmotion(emotion) {
+    const emotionLower = emotion.toLowerCase();
+    const results = [];
+
+    for (const b of this.getActiveBeliefs()) {
+      if (b.emotions?.some(e => e.toLowerCase() === emotionLower)) {
+        results.push({ type: 'belief', item: b });
+      }
+    }
+    for (const p of this.getActivePreferences()) {
+      if (p.emotions?.some(e => e.toLowerCase() === emotionLower)) {
+        results.push({ type: 'preference', item: p });
+      }
+    }
+    for (const i of this.getActiveIdentities()) {
+      if (i.emotions?.some(e => e.toLowerCase() === emotionLower)) {
+        results.push({ type: 'identity', item: i });
+      }
+    }
+
+    return results;
+  }
+
   // ── Native Vector Index ───────────────────────────────
 
   /**

@@ -352,7 +352,7 @@ export class Scorer {
 
   async #computeLegacyScores(story) {
     const cfScore = this.enableCollaborativeFiltering ?
-      this.#collaborativeScore(story) :
+      await this.#collaborativeScore(story) :
       { score: 0, confidence: 0 };
 
     // Split interest_match into typed alignment components for better opinion prediction
@@ -883,25 +883,23 @@ export class Scorer {
    * Collaborative filtering score - "users like you" signal
    * Complements clone evolution with actual user behavior data
    */
-  #collaborativeScore(story) {
+  async #collaborativeScore(story) {
     if (!this.enableCollaborativeFiltering) {
       return { score: 0, confidence: 0, reason: 'CF disabled' };
     }
 
     try {
-      const cfResult = globalCollaborativeFilter.getCollaborativeScore(
+      const cfResult = await globalCollaborativeFilter.getCollaborativeScore(
         this.userId,
         story.id,
         this.kg
       );
 
-      // CF is most valuable when we have confident signals from similar users
-      // Weight the score by confidence to handle cold start gracefully
-      const weightedScore = cfResult.cf_score * cfResult.confidence;
-
+      // Use raw CF score — confidence is used to weight CF's contribution
+      // in the composite score, not to penalize CF score itself
       return {
-        score: weightedScore,
-        confidence: cfResult.confidence,
+        score: cfResult.cf_score || 0,
+        confidence: cfResult.confidence || 0,
         reason: cfResult.reason,
         similarUsers: cfResult.similar_users_count || 0,
         isNewItem: cfResult.cold_start || false,

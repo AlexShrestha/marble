@@ -239,18 +239,12 @@ export class SimulationQueue extends EventEmitter {
     for (const survivor of survivors) {
       for (const fact of survivor.output_facts) {
         try {
-          if (typeof kg.addFact === 'function') {
-            kg.addFact(fact);
-            folded.push({ clone_id: survivor.clone_id, fact });
-          } else if (typeof kg.addBelief === 'function') {
-            kg.addBelief({
-              topic: fact.origin_question || 'l3-inferred',
-              confidence: fact.confidence,
-              source: fact.source,
-              meta: fact
-            });
-            folded.push({ clone_id: survivor.clone_id, fact });
-          }
+          // addBelief takes positional args: (topic, claim, strength)
+          const topic = fact.origin_question || 'l3-inferred';
+          const claim = `Inferred from L3 simulation (source: ${fact.source || 'clone'})`;
+          const strength = Math.min(0.9, fact.confidence || 0.6);
+          kg.addBelief(topic, claim, strength);
+          folded.push({ clone_id: survivor.clone_id, fact });
         } catch (_) {
           // non-fatal: KG may not support all fact types
         }

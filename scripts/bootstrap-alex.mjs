@@ -1,69 +1,139 @@
 #!/usr/bin/env node
 /**
- * bootstrap-alex.mjs — Seed Marble KG for Alex using InvestigativeCommittee
+ * bootstrap-alex.mjs — Seed Marble KG for Alex
  *
- * Clears any existing KG and rebuilds from ground truth.
- * Data sources: Charlie memory files (local), Obsidian vault notes.
+ * Pipeline:
+ *   Phase 1: ConversationMiner on all chat exports → thousands of raw nodes
+ *   Phase 2: Inference pass on clusters → psychological patterns
+ *   Phase 3: InvestigativeCommittee fills gaps with recursive follow-ups
+ *   Phase 4: Cross-reference all beliefs → contradictions, clusters
  *
  * Usage:
  *   node scripts/bootstrap-alex.mjs
- *   node scripts/bootstrap-alex.mjs --dry-run   # show questions without saving
+ *   node scripts/bootstrap-alex.mjs --dry-run
+ *   ROUNDS=3 node scripts/bootstrap-alex.mjs
  */
 
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+// glob requires Node 22+; use readdirSync fallback for Node 20
+const glob = async (pattern) => {
+  const dir = path.dirname(pattern.replace(/\*.*/, ''));
+  if (!fs.existsSync(dir)) return [];
+  const ext = pattern.match(/\*(\.\w+)$/)?.[1] || '';
+  return fs.readdirSync(dir).filter(f => !ext || f.endsWith(ext)).map(f => path.join(dir, f));
+};
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 const KG_PATH = path.join(ROOT, 'data', 'kg', 'alex.json');
 const DRY_RUN = process.argv.includes('--dry-run');
+const HOME = process.env.HOME;
 
-// ── LLM provider (DeepSeek local or Claude fallback) ──────────────────
+// ── LLM provider ────────────────────────────────────────────────────────
+const LLM_URL = 'https://vad-serv-1.tail5fdf86.ts.net/api/chat';
+const LLM_MODEL = 'kimi-k2.5:cloud';
+const LLM_API_KEY = process.env.MARBLE_API_KEY || '';
+const LLM_TIMEOUT = 600_000; // 600s
+const MAX_RETRIES = 5;
+
 async function llmCall(prompt) {
-  // Try DeepSeek first (local, Tailscale)
-  try {
-    const res = await fetch('http://vad-serv-1.tail5fdf86.ts.net:13451/v1/chat/completions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: 'deepseek-r1:14b',
-        messages: [{ role: 'user', content: prompt }],
-        temperature: 0.7,
-      }),
-      signal: AbortSignal.timeout(30000),
-    });
-    if (res.ok) {
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    try {
+      const res = await fetch(LLM_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(LLM_API_KEY ? { 'x-api-key': LLM_API_KEY } : {}),
+        },
+        body: JSON.stringify({
+          model: LLM_MODEL,
+          stream: false,
+          messages: [{ role: 'user', content: prompt }],
+        }),
+        signal: AbortSignal.timeout(LLM_TIMEOUT),
+      });
+
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        throw new Error(`HTTP ${res.status}: ${body.slice(0, 200)}`);
+      }
+
       const j = await res.json();
-      return j.choices?.[0]?.message?.content || '';
+      // Ollama format: data.message.content
+      const content = j.message?.content || j.choices?.[0]?.message?.content || '';
+      if (!content) throw new Error('Empty LLM response');
+      return content;
+    } catch (err) {
+      const isNetworkError = err.name === 'AbortError' || err.code === 'ECONNREFUSED' || err.code === 'ENOTFOUND' || err.message.includes('fetch failed');
+      if (isNetworkError && attempt < MAX_RETRIES - 1) {
+        const delay = Math.min(5000, 1000 * (attempt + 1));
+        console.warn(`[LLM] Retry ${attempt + 1}/${MAX_RETRIES} after ${err.message} (waiting ${delay}ms)`);
+        await new Promise(r => setTimeout(r, delay));
+        continue;
+      }
+      throw err;
     }
-  } catch {
-    // fall through to Claude
   }
-
-  // Fallback: Claude via env
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) throw new Error('No LLM available — DeepSeek unreachable and ANTHROPIC_API_KEY not set');
-
-  const { Anthropic } = await import('@anthropic-ai/sdk');
-  const client = new Anthropic({ apiKey });
-  const msg = await client.messages.create({
-    model: 'claude-haiku-4-5-20251001',
-    max_tokens: 1024,
-    messages: [{ role: 'user', content: prompt }],
-  });
-  return msg.content[0].text;
 }
 
-// ── Data sources ───────────────────────────────────────────────────────
+// ── Data sources ─────────────────────────────────────────────────────────
 
-const MEMORY_DIR = path.resolve(process.env.HOME, '.config/meridian/profiles/default/projects/-Users-aleksandrshrestha/memory');
-const OBSIDIAN_DIR = path.resolve(process.env.HOME, 'Documents/charlie');
+// Claude memory files (all projects)
+function findClaudeMemory() {
+  const baseDir = path.join(HOME, '.claude', 'projects');
+  const results = [];
+  if (!fs.existsSync(baseDir)) return results;
+  try {
+    const projects = fs.readdirSync(baseDir);
+    for (const proj of projects) {
+      const memDir = path.join(baseDir, proj, 'memory');
+      if (fs.existsSync(memDir)) {
+        const files = fs.readdirSync(memDir).filter(f => f.endsWith('.md'));
+        for (const file of files) {
+          try {
+            results.push({ file: `claude:${proj}/${file}`, content: fs.readFileSync(path.join(memDir, file), 'utf8') });
+          } catch { /* skip */ }
+        }
+      }
+    }
+  } catch { /* skip */ }
+  return results;
+}
 
-function readDirText(dir, maxFiles = 20) {
+// ChatGPT exports
+function findChatGPTExports() {
+  const dlDir = path.join(HOME, 'Downloads');
+  if (!fs.existsSync(dlDir)) return [];
+  return fs.readdirSync(dlDir)
+    .filter(f => f.startsWith('conversations-') && f.endsWith('.json'))
+    .map(f => path.join(dlDir, f));
+}
+
+// GitHub READMEs
+function findGitHubReadmes() {
+  const ghDir = path.join(HOME, 'Documents', 'GitHub');
+  const results = [];
+  if (!fs.existsSync(ghDir)) return results;
+  try {
+    const repos = fs.readdirSync(ghDir);
+    for (const repo of repos) {
+      const readme = path.join(ghDir, repo, 'README.md');
+      if (fs.existsSync(readme)) {
+        try {
+          results.push({ file: `github:${repo}/README.md`, content: fs.readFileSync(readme, 'utf8') });
+        } catch { /* skip */ }
+      }
+    }
+  } catch { /* skip */ }
+  return results;
+}
+
+function readDirText(dir, maxFiles = 50) {
   const results = [];
   if (!fs.existsSync(dir)) return results;
-  const files = fs.readdirSync(dir).filter(f => f.endsWith('.md')).slice(0, maxFiles);
+  const files = fs.readdirSync(dir).filter(f => f.endsWith('.md') || f.endsWith('.txt')).slice(0, maxFiles);
   for (const file of files) {
     try {
       results.push({ file, content: fs.readFileSync(path.join(dir, file), 'utf8') });
@@ -77,21 +147,24 @@ function buildSearchFn(documents) {
     const q = query.toLowerCase();
     const hits = [];
     for (const { file, content } of documents) {
-      // Score by keyword overlap
       const words = q.split(/\s+/).filter(w => w.length > 3);
       const matches = words.filter(w => content.toLowerCase().includes(w));
       if (matches.length > 0) {
-        // Extract surrounding context
-        const lines = content.split('\n');
-        const relevant = lines.filter(l => matches.some(w => l.toLowerCase().includes(w)));
-        hits.push(`[${file}] ${relevant.slice(0, 3).join(' | ')}`);
+        // For strong matches (3+ keywords), return full content (capped at 2000 chars)
+        if (matches.length >= 3) {
+          hits.push(`[${file}] ${content.slice(0, 2000)}`);
+        } else {
+          const lines = content.split('\n');
+          const relevant = lines.filter(l => matches.some(w => l.toLowerCase().includes(w)));
+          hits.push(`[${file}] ${relevant.slice(0, 8).join(' | ')}`);
+        }
       }
     }
-    return hits.slice(0, 8);
+    return hits.slice(0, 12);
   };
 }
 
-// ── Seed facts ─────────────────────────────────────────────────────────
+// ── Seed facts ────────────────────────────────────────────────────────────
 
 const ALEX_SEED = {
   id: 'alex',
@@ -120,32 +193,37 @@ const ALEX_SEED = {
   history: [],
   source_trust: {},
   beliefs: [
-    { topic: 'building', claim: 'Ship fast, learn from real users — not from planning', strength: 0.9, evidence_count: 1 },
-    { topic: 'AI', claim: 'AI agents will replace most solo founder execution within 2 years', strength: 0.85, evidence_count: 1 },
+    { topic: 'building', claim: 'Ship fast, learn from real users — not from planning', strength: 0.9, evidence_count: 1, valid_from: new Date().toISOString(), valid_to: null, recorded_at: new Date().toISOString() },
+    { topic: 'AI', claim: 'AI agents will replace most solo founder execution within 2 years', strength: 0.85, evidence_count: 1, valid_from: new Date().toISOString(), valid_to: null, recorded_at: new Date().toISOString() },
   ],
   preferences: [
-    { type: 'work_style', description: 'Prefers systems thinking + delegation over manual execution', strength: 0.85 },
-    { type: 'content', description: 'Direct, no-fluff communication — skips pleasantries', strength: 0.9 },
+    { type: 'work_style', description: 'Prefers systems thinking + delegation over manual execution', strength: 0.85, valid_from: new Date().toISOString(), valid_to: null, recorded_at: new Date().toISOString() },
+    { type: 'content', description: 'Direct, no-fluff communication — skips pleasantries', strength: 0.9, valid_from: new Date().toISOString(), valid_to: null, recorded_at: new Date().toISOString() },
   ],
   identities: [
-    { role: 'multi-venture founder', context: 'Barcelona, 5-month runway', salience: 1.0 },
-    { role: 'builder', context: 'AI tools, consumer apps', salience: 0.9 },
+    { role: 'multi-venture founder', context: 'Barcelona, 5-month runway', salience: 1.0, valid_from: new Date().toISOString(), valid_to: null, recorded_at: new Date().toISOString() },
+    { role: 'builder', context: 'AI tools, consumer apps', salience: 0.9, valid_from: new Date().toISOString(), valid_to: null, recorded_at: new Date().toISOString() },
   ],
   confidence: { AI: 0.9, marketing: 0.75, logistics: 0.6, coaching: 0.65 },
   clones: [],
 };
 
-// ── Main ───────────────────────────────────────────────────────────────
+// ── Main ──────────────────────────────────────────────────────────────────
 
 async function main() {
   console.log('=== Marble Bootstrap: Alex ===\n');
 
-  // Load data sources
-  const memoryDocs = readDirText(MEMORY_DIR);
-  const obsidianDocs = readDirText(OBSIDIAN_DIR);
-  console.log(`Loaded ${memoryDocs.length} memory files, ${obsidianDocs.length} Obsidian files`);
+  // ── Phase 0: Gather data sources ──────────────────────
+  const claudeMemory = findClaudeMemory();
+  const chatGPTExports = findChatGPTExports();
+  const githubReadmes = findGitHubReadmes();
 
-  const allDocs = [...memoryDocs, ...obsidianDocs];
+  console.log(`Data sources found:`);
+  console.log(`  Claude memory files: ${claudeMemory.length}`);
+  console.log(`  ChatGPT export files: ${chatGPTExports.length}`);
+  console.log(`  GitHub READMEs: ${githubReadmes.length}`);
+
+  const allDocs = [...claudeMemory, ...githubReadmes];
   const searchFn = buildSearchFn(allDocs);
 
   // Initialise KG with seed
@@ -155,77 +233,192 @@ async function main() {
     updated_at: new Date().toISOString(),
   };
 
-  // Dynamically import InvestigativeCommittee
-  const { InvestigativeCommittee } = await import('../core/investigative-committee.js');
-
-  // Build a minimal KG wrapper for the committee
-  // Method names must match what InvestigativeCommittee._buildKGSnapshot() calls:
-  //   getActiveBeliefs(), getActivePreferences(), getActiveIdentities(), getInsights()
-  //   addBelief(key, value, confidence), addPreference(key, value), addIdentity(role, value)
+  // KG proxy that maps to real field names
   const kgProxy = {
     user: kgData.user,
-    // Read methods (called by _buildKGSnapshot)
-    getActiveBeliefs: () => kgData.user.beliefs.map(b => ({
-      topic: b.topic,
-      value: b.claim,
-      confidence: b.strength,
-    })),
-    getActivePreferences: () => kgData.user.preferences.map(p => ({
-      category: p.type,
-      value: p.description,
-    })),
-    getActiveIdentities: () => kgData.user.identities.map(i => ({
-      role: i.role,
-      value: i.context,
-    })),
-    getInsights: () => [],
-    // Write methods (called after investigation)
-    addBelief: (key, value, confidence = 0.75) => {
-      kgData.user.beliefs.push({ topic: key, claim: value, strength: confidence, evidence_count: 1 });
+    getActiveBeliefs: () => kgData.user.beliefs.filter(b => !b.valid_to),
+    getActivePreferences: () => kgData.user.preferences.filter(p => !p.valid_to),
+    getActiveIdentities: () => kgData.user.identities.filter(i => !i.valid_to),
+    getDimensionalPreferences: () => kgData._dimensionalPreferences || [],
+    getInterestWeight: (topic) => {
+      const i = kgData.user.interests.find(x => x.topic.toLowerCase() === topic.toLowerCase());
+      return i ? i.weight : 0;
     },
-    addPreference: (key, value) => {
-      kgData.user.preferences.push({ type: key, description: value, strength: 0.7 });
+    addBelief: (topic, claim, strength = 0.75) => {
+      const now = new Date().toISOString();
+      kgData.user.beliefs.push({ topic, claim, strength, evidence_count: 1, valid_from: now, valid_to: null, recorded_at: now });
     },
-    addIdentity: (role, value) => {
-      kgData.user.identities.push({ role, context: value, salience: 0.7 });
+    addPreference: (type, description, strength = 0.7) => {
+      const now = new Date().toISOString();
+      kgData.user.preferences.push({ type, description, strength, valid_from: now, valid_to: null, recorded_at: now });
     },
-    addClone: (c) => kgData.user.clones.push(c),
+    addIdentity: (role, context = '', salience = 0.7) => {
+      const now = new Date().toISOString();
+      kgData.user.identities.push({ role, context, salience, valid_from: now, valid_to: null, recorded_at: now });
+    },
+    tagEmotions: (type, topic, emotions) => {
+      const topicLower = topic.toLowerCase();
+      let collection;
+      if (type === 'belief') collection = kgData.user.beliefs;
+      else if (type === 'preference') collection = kgData.user.preferences;
+      else if (type === 'identity') collection = kgData.user.identities;
+      else return;
+      for (const item of collection) {
+        const key = item.topic || item.type || item.role || '';
+        if (key.toLowerCase() === topicLower && !item.valid_to) {
+          item.emotions = [...new Set([...(item.emotions || []), ...emotions])];
+        }
+      }
+    },
   };
 
-  const MAX_ROUNDS = parseInt(process.env.ROUNDS || '1');
+  // ── Phase 1: Mine conversations ──────────────────────────
+  if (chatGPTExports.length > 0) {
+    console.log('\n── Phase 1: Mining conversations ──');
+    const { ConversationMiner } = await import('../core/conversation-miner.js');
+    const miner = new ConversationMiner(llmCall, {
+      chunkSize: 20,
+      onProgress: (stats) => {
+        if (stats.phase === 'extract') {
+          console.log(`    chunk ${stats.chunksProcessed} → ${stats.nodesExtracted} nodes total`);
+        }
+        if (stats.phase === 'infer') {
+          console.log(`    inference batch ${stats.inferBatch} → ${stats.inferencesGenerated} inferences`);
+        }
+      },
+    });
+
+    let totalStats = { ingested: 0, beliefs: 0, preferences: 0, identities: 0, inferences: 0, duplicates_merged: 0 };
+
+    for (const exportPath of chatGPTExports) {
+      console.log(`\n  Processing: ${path.basename(exportPath)}`);
+      try {
+        const stats = await miner.ingestIntoKG(exportPath, kgProxy, { exchangeMode: false, runInference: true });
+        totalStats.ingested += stats.ingested;
+        totalStats.beliefs += stats.beliefs;
+        totalStats.preferences += stats.preferences;
+        totalStats.identities += stats.identities;
+        totalStats.inferences += stats.inferences;
+        totalStats.duplicates_merged += stats.duplicates_merged;
+        console.log(`    → ${stats.ingested} nodes (${stats.beliefs}b/${stats.preferences}p/${stats.identities}i), ${stats.inferences} inferences, ${stats.duplicates_merged} dupes merged`);
+      } catch (err) {
+        console.warn(`    ✗ Failed: ${err.message}`);
+      }
+    }
+
+    console.log(`\n  Phase 1 total: ${totalStats.ingested} nodes ingested, ${totalStats.inferences} inferences`);
+    console.log(`  KG now has: ${kgData.user.beliefs.length} beliefs, ${kgData.user.preferences.length} prefs, ${kgData.user.identities.length} identities`);
+  } else {
+    console.log('\n[skip] No ChatGPT exports found in ~/Downloads/');
+  }
+
+  // ── Phase 2: Mine Claude memory ──────────────────────────
+  if (claudeMemory.length > 0) {
+    console.log('\n── Phase 2: Mining Claude memory files ──');
+    for (const { file, content } of claudeMemory) {
+      // Direct extraction from structured memory files (simpler than conversation mining)
+      try {
+        const prompt = `Extract knowledge graph nodes from this AI assistant memory file about a user.
+
+File: ${file}
+Content:
+${content.slice(0, 3000)}
+
+Return ONLY a JSON array:
+[{ "type": "belief"|"preference"|"identity", "value": "statement about user", "confidence": 0.7-0.9, "topic": "category" }]`;
+
+        const raw = await llmCall(prompt);
+        const nodes = parseNodesFromRaw(raw);
+        for (const node of nodes) {
+          if (node.type === 'belief' || node.type === 'decision') kgProxy.addBelief(node.topic, node.value, node.confidence);
+          else if (node.type === 'preference') kgProxy.addPreference(node.topic, node.value, node.confidence);
+          else if (node.type === 'identity') kgProxy.addIdentity(node.topic, node.value, node.confidence);
+        }
+        if (nodes.length > 0) console.log(`  ${file}: ${nodes.length} nodes`);
+      } catch (err) {
+        console.warn(`  ${file}: failed (${err.message})`);
+      }
+    }
+    console.log(`  KG now has: ${kgData.user.beliefs.length} beliefs, ${kgData.user.preferences.length} prefs, ${kgData.user.identities.length} identities`);
+  }
+
+  // ── Phase 3: Investigative Committee fills gaps ──────────
+  console.log('\n── Phase 3: Investigative Committee (gap-filling) ──');
+
+  const { InvestigativeCommittee } = await import('../core/investigative-committee.js');
+
+  const MAX_ROUNDS = parseInt(process.env.ROUNDS || '2');
   const committee = new InvestigativeCommittee(kgProxy, llmCall, {
     maxRounds: MAX_ROUNDS,
     maxQuestionsPerRound: 4,
+    maxFollowUpsPerFinding: 2,
+    enableDebate: true,
+    enablePsychInference: true,
+    enableCrossRef: true,
   });
-  committee.registerSource('charlie-memory', searchFn);
 
-  console.log(`\nRunning investigative loop (${MAX_ROUNDS} round(s))...\n`);
+  // Register all document sources for evidence search
+  committee.registerSource('claude-memory', buildSearchFn(claudeMemory));
+  committee.registerSource('github-readmes', buildSearchFn(githubReadmes));
+
+  console.log(`  Running ${MAX_ROUNDS} round(s) with ${kgData.user.beliefs.length} beliefs as starting context...\n`);
   try {
     const result = await committee.investigate(MAX_ROUNDS);
-    console.log(`\nInvestigation complete:`);
-    console.log(`  Questions answered: ${result.answered}`);
-    console.log(`  Knowledge gaps: ${result.gaps.length}`);
+    console.log(`\n  Investigation complete:`);
+    console.log(`    Questions answered: ${result.answered}`);
+    console.log(`    Knowledge gaps: ${result.gaps.length}`);
+    console.log(`    Psych inferences: ${result.psychInferences?.length || 0}`);
+    console.log(`    Committee: ${result.committee?.map(c => c.name).join(', ') || '(fallback)'}`);
+
+    if (result.crossRefResults) {
+      console.log(`    Contradictions: ${result.crossRefResults.contradictions?.length || 0}`);
+      console.log(`    Clusters: ${result.crossRefResults.clusters?.length || 0}`);
+    }
+
     if (result.gaps.length) {
-      console.log('\nGaps (clone hypotheses):');
-      result.gaps.forEach((g, i) => console.log(`  ${i + 1}. ${g}`));
+      console.log('\n  Knowledge gaps (for clone hypotheses):');
+      result.gaps.slice(0, 10).forEach((g, i) => console.log(`    ${i + 1}. ${g}`));
     }
   } catch (err) {
-    console.error('Investigation error:', err.message);
-    console.log('Continuing with seed data only...');
+    console.error('  Investigation error:', err.message);
+    console.log('  Continuing with mined data...');
   }
 
+  // ── Save ────────────────────────────────────────────────
   if (DRY_RUN) {
     console.log('\n[dry-run] KG not saved.');
+    console.log(`  Would save: ${kgData.user.beliefs.length} beliefs, ${kgData.user.preferences.length} prefs, ${kgData.user.identities.length} identities`);
     return;
   }
 
-  // Save
   fs.mkdirSync(path.join(ROOT, 'data', 'kg'), { recursive: true });
   fs.writeFileSync(KG_PATH, JSON.stringify(kgData, null, 2));
   console.log(`\n✓ KG saved to ${KG_PATH}`);
-  console.log(`  Interests: ${kgData.user.interests.length}`);
   console.log(`  Beliefs: ${kgData.user.beliefs.length}`);
+  console.log(`  Preferences: ${kgData.user.preferences.length}`);
+  console.log(`  Identities: ${kgData.user.identities.length}`);
   console.log(`  Clones: ${kgData.user.clones.length}`);
+}
+
+// Helper for raw LLM response parsing (used in Phase 2)
+function parseNodesFromRaw(responseText) {
+  let text = responseText.trim();
+  text = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '');
+  const start = text.indexOf('[');
+  const end = text.lastIndexOf(']');
+  if (start === -1 || end === -1) return [];
+  try {
+    const nodes = JSON.parse(text.slice(start, end + 1));
+    if (!Array.isArray(nodes)) return [];
+    return nodes.filter(n => n && n.type && n.value).map(n => ({
+      type: String(n.type).toLowerCase(),
+      value: String(n.value).trim(),
+      confidence: Math.max(0, Math.min(1, parseFloat(n.confidence) || 0.6)),
+      topic: String(n.topic || n.type).trim(),
+    }));
+  } catch {
+    return [];
+  }
 }
 
 main().catch(console.error);

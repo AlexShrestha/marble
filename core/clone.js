@@ -21,7 +21,7 @@ export class Clone {
   takeSnapshot() {
     const user = this.kg.user;
     if (!user) {
-      this._snapshot = { interests: {}, patterns: {}, context: {}, source_trust: {}, created_at: new Date().toISOString() };
+      this._snapshot = { interests: {}, patterns: {}, context: {}, source_trust: {}, beliefs: [], preferences: [], identities: [], dimensionalPreferences: [], created_at: new Date().toISOString() };
       return;
     }
 
@@ -45,11 +45,21 @@ export class Clone {
       mood: user.context.mood_signal
     };
 
+    // Capture typed memory nodes
+    const beliefs = this.kg.getActiveBeliefs?.() || [];
+    const preferences = this.kg.getActivePreferences?.() || [];
+    const identities = this.kg.getActiveIdentities?.() || [];
+    const dimensionalPreferences = this.kg.getDimensionalPreferences?.() || [];
+
     this._snapshot = {
       interests,
       patterns,
       context,
       source_trust: { ...user.source_trust },
+      beliefs,
+      preferences,
+      identities,
+      dimensionalPreferences,
       created_at: new Date().toISOString()
     };
 
@@ -118,6 +128,39 @@ export class Clone {
     }
     if (distrusted.length) {
       lines.push(`## Distrusted sources: ${distrusted.map(([s]) => s).join(', ')}`);
+    }
+
+    // Beliefs
+    if (s.beliefs?.length) {
+      lines.push('\n## Core Beliefs');
+      for (const b of s.beliefs.slice(0, 15)) {
+        lines.push(`- ${b.topic}: ${b.claim} (strength: ${(b.strength * 100).toFixed(0)}%)`);
+      }
+    }
+
+    // Preferences
+    if (s.preferences?.length) {
+      lines.push('\n## Preferences');
+      for (const p of s.preferences.slice(0, 15)) {
+        const dir = p.strength > 0 ? 'likes' : p.strength < 0 ? 'dislikes' : 'neutral on';
+        lines.push(`- ${dir} ${p.type}: ${p.description}`);
+      }
+    }
+
+    // Identities
+    if (s.identities?.length) {
+      lines.push('\n## Identity');
+      for (const i of s.identities.slice(0, 10)) {
+        lines.push(`- ${i.role}${i.context ? ' — ' + i.context : ''}`);
+      }
+    }
+
+    // Dimensional preferences
+    if (s.dimensionalPreferences?.length) {
+      lines.push('\n## Taste Dimensions');
+      for (const d of s.dimensionalPreferences.slice(0, 10)) {
+        lines.push(`- ${d.domain || '?'}/${d.dimensionId || '?'}: strength ${d.strength?.toFixed(2)}`);
+      }
     }
 
     return lines.join('\n');

@@ -15,9 +15,9 @@ export class CollaborativeFilter {
     this.interactions = new Map(); // userId -> Map(contentId -> InteractionData)
     this.userProfiles = new Map(); // userId -> UserProfile (interests, topics)
     this.similarityCache = new Map(); // userId_userId -> similarity score
-    this.minSimilarity = options.minSimilarity || 0.3;
+    this.minSimilarity = options.minSimilarity || 0.1;
     this.maxSimilarUsers = options.maxSimilarUsers || 10;
-    this.coldStartThreshold = options.coldStartThreshold || 3; // min users needed for CF
+    this.coldStartThreshold = options.coldStartThreshold || 1; // allow CF from first similar user
     this.vectorWeight = options.vectorWeight || 0.7;   // ONNX embedding similarity weight
     this.topicWeight = options.topicWeight || 0.3;     // topic-overlap similarity weight
     this.userEmbeddings = new Map(); // userId -> Float32Array (384-dim)
@@ -337,8 +337,8 @@ export class CollaborativeFilter {
   _computeConfidence(interactions, totalSimilarUsers) {
     if (interactions.length === 0) return 0;
 
-    // Base confidence from number of interactions
-    const interactionConfidence = Math.min(1, interactions.length / 5);
+    // Base confidence from number of interactions (floors at 0.15 so even 1 interaction contributes)
+    const interactionConfidence = Math.max(0.15, Math.min(1, interactions.length / 5));
 
     // Average similarity of contributing users
     const avgSimilarity = interactions.reduce((sum, int) => sum + int.similarity, 0) / interactions.length;
@@ -346,9 +346,10 @@ export class CollaborativeFilter {
     // Consensus among similar users (how aligned are their reactions?)
     const avgScore = interactions.reduce((sum, int) => sum + int.score, 0) / interactions.length;
     const variance = interactions.reduce((sum, int) => sum + Math.pow(int.score - avgScore, 2), 0) / interactions.length;
-    const consensus = Math.max(0, 1 - variance * 2); // Lower variance = higher consensus
+    const consensus = Math.max(0.2, 1 - variance * 2); // Floor at 0.2 so single-user CF still works
 
-    return interactionConfidence * avgSimilarity * consensus;
+    // Additive blend instead of pure multiplicative (avoids any-zero-kills-all)
+    return interactionConfidence * 0.4 + avgSimilarity * 0.3 + consensus * 0.3;
   }
 
   /**

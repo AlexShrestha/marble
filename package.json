@@ -6,7 +6,7 @@
   "main": "core/index.js",
   "scripts": {
     "start": "node api/server.js",
-    "test": "node --test test/**/*.test.js",
+    "test": "node --test test/*.test.js",
     "web": "node web/index.js",
     "web:reader": "node web/reader.js",
     "web:tracker": "node web/tracker.js",

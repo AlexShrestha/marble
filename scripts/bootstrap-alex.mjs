@@ -279,11 +279,11 @@ async function main() {
     const miner = new ConversationMiner(llmCall, {
       chunkSize: 20,
       onProgress: (stats) => {
-        if (stats.phase === 'extract' && stats.chunksProcessed % 10 === 0) {
-          process.stdout.write(`\r  Chunks: ${stats.chunksProcessed} | Nodes: ${stats.nodesExtracted}`);
+        if (stats.phase === 'extract') {
+          console.log(`    chunk ${stats.chunksProcessed} → ${stats.nodesExtracted} nodes total`);
         }
         if (stats.phase === 'infer') {
-          process.stdout.write(`\r  Inference batch: ${stats.inferBatch} | Inferences: ${stats.inferencesGenerated}`);
+          console.log(`    inference batch ${stats.inferBatch} → ${stats.inferencesGenerated} inferences`);
         }
       },
     });

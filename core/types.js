@@ -59,11 +59,11 @@
 
 /**
  * @typedef {Object} ReactionHistory
- * @property {string} story_id - Story that was reacted to
+ * @property {string} item_id - Item that was reacted to (legacy: story_id)
  * @property {'up'|'down'|'skip'|'share'} reaction - User reaction
  * @property {Date} date - When reacted
- * @property {string[]} topics - Topics of the story
- * @property {string} source - Source of the story
+ * @property {string[]} topics - Topics of the item
+ * @property {string} source - Source of the item
  */
 
 /**
@@ -289,18 +289,18 @@ export const USE_CASE_CONFIGS = {
       source_trust: 0.05
     }
   },
-  movie_recommendation: {
+  deep_personalization: {
     targetMetrics: ['recommendation_quality', 'user_satisfaction'],
     initialWeights: {
       preference_alignment: 0.25,
       belief_alignment: 0.15,
-      identity_alignment: 0.10,
-      interest_match: 0.10,
-      entity_affinity: 0.25,
+      identity_alignment: 0.15,
+      interest_match: 0.15,
+      entity_affinity: 0.20,
       temporal_relevance: 0.00,
       novelty: 0.10,
       actionability: 0.00,
-      source_trust: 0.05
+      source_trust: 0.00,
     }
   }
 };

@@ -13,7 +13,7 @@
  * @returns {string|null}
  */
 function detectDomain(item) {
-  // Explicit domain/type field
+  // Explicit domain/type field from caller — pass through unchanged
   if (item.domain) return item.domain.toLowerCase();
   if (item.type) return item.type.toLowerCase();
 
@@ -21,16 +21,17 @@ function detectDomain(item) {
   if (meta.domain) return meta.domain.toLowerCase();
   if (meta.type) return meta.type.toLowerCase();
 
-  // Infer from metadata fields
-  if (meta.director || meta.cast) return 'movie';
-  if (meta.artist || meta.album) return 'music';
-  if (meta.author && (meta.publisher || meta.isbn)) return 'book';
-  if (meta.cuisine || meta.chef) return 'restaurant';
-  if (item.tags?.includes('film') || item.tags?.includes('movie')) return 'movie';
-  if (item.tags?.includes('music') || item.tags?.includes('album')) return 'music';
-  if (item.tags?.includes('book')) return 'book';
+  // Infer from metadata fields using neutral domain labels that don't
+  // leak into user beliefs as content-specific jargon.
+  if (meta.director || meta.cast) return 'visual_media';
+  if (meta.artist || meta.album) return 'audio';
+  if (meta.author && (meta.publisher || meta.isbn)) return 'long_form_text';
+  if (meta.cuisine || meta.chef) return 'place';
+  if (item.tags?.includes('film') || item.tags?.includes('movie')) return 'visual_media';
+  if (item.tags?.includes('music') || item.tags?.includes('album')) return 'audio';
+  if (item.tags?.includes('book')) return 'long_form_text';
 
-  // Default: treat as generic content
+  // Default: generic item with source attribution
   return item.source ? 'article' : null;
 }
 

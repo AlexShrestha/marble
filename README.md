@@ -9,8 +9,19 @@
 
 ```javascript
 import { Marble } from 'marble';
-const marble = new Marble();
-const top10 = await marble.select(stories, userContext);  // ranked + explained
+
+const marble = new Marble({
+  storage: './user-kg.json',
+  llm: async (prompt) => callYourLLM(prompt),
+});
+await marble.init();
+
+// Rank items — second arg is ephemeral context, not user data.
+// User data is built up through react() / feedbackBatch() / learn().
+const top10 = await marble.select(items, {
+  calendar: ['investor call 14:00'],
+  active_projects: ['launch prep'],
+});
 ```
 
 Marble creates multiple simulated versions of a user, tests them against real-world signals, and learns which version predicts their actual behavior. No thumbs-up buttons needed.
@@ -97,34 +108,46 @@ npm install marble
 ```javascript
 import { Marble } from 'marble';
 
-const marble = new Marble();
-const topStories = await marble.select(stories, {
-  interests: ['AI', 'startups'],
+const marble = new Marble({
+  storage: './user-kg.json',
+  llm: async (prompt) => callYourLLM(prompt), // enables L1.5-L3 pipeline
+});
+await marble.init();
+
+// (Optional) Ingest existing user data
+await marble.ingestConversations('./chatgpt-export.json');
+
+// Rank items. Second arg is ephemeral context — calendar/projects/mood,
+// not user profile data.
+const ranked = await marble.select(items, {
   calendar: ['investor call 14:00'],
-  projects: ['newsletter platform']
+  active_projects: ['launch prep'],
 });
 
-topStories.forEach((story, i) => {
-  console.log(`${i+1}. [${story.score.toFixed(3)}] ${story.title}`);
-  console.log(`   Why: ${story.reasoning}`);
+ranked.forEach((item, i) => {
+  console.log(`${i+1}. [${item.relevance_score.toFixed(3)}] ${item.title}`);
 });
-```
 
-**Learn from engagement (no buttons needed):**
+// Record a reaction — pass the full item, not just the id
+await marble.react(items[0], 'up');
 
-```javascript
-// Explicit feedback
-await marble.react('story-123', 'up', ['ai', 'productivity']);
+// Or process an entire batch at once (contrastive learning: Day 2 > Day 1)
+await marble.feedbackBatch([
+  { item: items[0], reaction: 'up' },
+  { item: items[1], reaction: 'skip' },
+  { item: items[2], reaction: 'share' },
+]);
 
-// Implicit signals (dwell time, clicks, shares)
-await marble.signal('story-456', 'dwell', { duration: 45000 });
+// Run the deep learning pipeline (L1.5 insight swarm → L2 inference → L3 clone evolution)
+const stats = await marble.learn();
+// { insights: 7, candidates: 4, clones: 12 }
 ```
 
 **Run tests:**
 
 ```bash
-git clone https://github.com/AlexShrestha/prism.git
-cd prism && npm install && npm test
+git clone https://github.com/AlexShrestha/marble.git
+cd marble && npm install && npm test
 ```
 
 ## Features

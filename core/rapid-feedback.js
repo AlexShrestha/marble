@@ -50,7 +50,8 @@ export class RapidFeedbackEngine {
    * @param {Array<{ story: Object, reaction: 'up'|'down'|'skip'|'share' }>} slateReactions
    * @returns {Promise<{ inferences: Object[], revelations: Object[], dimensionUpdates: Object }>}
    */
-  async processSlate(slateReactions) {
+  async processBatch(batchReactions) {
+    const slateReactions = batchReactions; // internal alias for backward compat below
     if (!slateReactions?.length) return { inferences: [], revelations: [], dimensionUpdates: {} };
 
     // Step 1: Separate into engaged vs rejected
@@ -123,6 +124,13 @@ export class RapidFeedbackEngine {
     });
 
     return { inferences, revelations, dimensionUpdates };
+  }
+
+  /**
+   * @deprecated Use processBatch() instead. Kept for backward compatibility.
+   */
+  async processSlate(slateReactions) {
+    return this.processBatch(slateReactions);
   }
 
   /**

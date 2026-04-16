@@ -108,20 +108,20 @@ export const USE_CASE_PROFILES = {
     learningRate: 0.10
   },
 
-  movie_recommendation: {
+  deep_personalization: {
     targetMetric: METRIC_TYPES.CUSTOM,
     weights: {
       preference_alignment: 0.25,
       belief_alignment: 0.15,
-      identity_alignment: 0.10,
-      interest_match: 0.10,
-      entity_affinity: 0.25,
+      identity_alignment: 0.15,
+      interest_match: 0.15,
+      entity_affinity: 0.20,
       temporal_relevance: 0.00,
       novelty: 0.10,
       actionability: 0.00,
-      source_trust: 0.05
+      source_trust: 0.00,
     },
-    description: 'Optimize for movie recommendations using entity-attribute matching from secondary context',
+    description: 'Maximum personalization via typed alignment + entity metadata matching. Works for any domain with rich item metadata.',
     performanceThreshold: 0.15,
     learningRate: 0.10
   }

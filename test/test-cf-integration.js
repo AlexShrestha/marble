@@ -3,7 +3,7 @@
  * Confirms that CF is properly integrated and functioning end-to-end
  */
 
-import { CollaborativeFilter } from '../collaborative-filter.js';
+import { CollaborativeFilter } from '../core/collaborative-filter.js';
 import { Scorer } from '../core/scorer.js';
 
 // Mock KG

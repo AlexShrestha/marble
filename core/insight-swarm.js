@@ -46,7 +46,10 @@ function extractKGSummary(kg) {
   const dimPrefs = kg.getDimensionalPreferences?.() || [];
 
   const interests  = (user.interests  || []).map(i => ({ topic: i.topic, weight: i.weight, trend: i.trend }));
-  const history    = (user.history    || []).filter(h => h.story_id && !h.story_id.startsWith('sim_'));
+  const history    = (user.history    || []).filter(h => {
+    const id = h.item_id || h.story_id;
+    return id && !id.startsWith('sim_');
+  });
   const beliefs    = memNodes.beliefs    || [];
   const identities = memNodes.identities || [];
 

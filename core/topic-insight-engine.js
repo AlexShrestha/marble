@@ -327,7 +327,7 @@ export class GapSimulator {
     const historyContext = ratedHistory
       .filter(h => h.reaction === 'up' || h.reaction === 'down' || h.reaction === 'share')
       .slice(-20)
-      .map(h => `${h.reaction === 'down' ? 'disliked' : 'liked'}: ${h.topics?.join(', ') || h.story_id}`)
+      .map(h => `${h.reaction === 'down' ? 'disliked' : 'liked'}: ${h.topics?.join(', ') || h.item_id || h.story_id}`)
       .join('\n');
 
     const gapDescriptions = gaps.map(g => `- ${g.id} (${g.label}): item's value = "${g.value}"`).join('\n');

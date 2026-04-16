@@ -16,13 +16,17 @@ import { getWorldContextFromCache } from './worldsim-bridge.js';
 export class Scorer {
   constructor(kg, options = {}) {
     this.kg = kg;
+    this.options = options;
     this.useCase = options.useCase || 'content_curation';
     this.metricConfig = options.metricConfig;
     this.mode = options.mode || 'content_curation'; // Support decision_compression mode
     this.userId = options.userId || kg?.user?.id || 'default_user';
     this.enableCollaborativeFiltering = options.enableCollaborativeFiltering !== false; // Default true
     this.enableSessionAdaptation = options.enableSessionAdaptation !== false; // Default true
-    this.signalProcessor = options.signalProcessor || null; // Pass signal processor for session access
+    this.signalProcessor = options.signalProcessor || null;
+    // Threshold at which Marble stops leaning on popularity prior.
+    // Default 10 means sparse profiles quickly shift to personalization signals.
+    this.coldStartThreshold = options.coldStartThreshold ?? 10;
 
     // Initialize metric-driven scoring engine
     if (this.metricConfig) {
@@ -181,11 +185,14 @@ export class Scorer {
       const entityBoost = secondaryNodeCount >= 2 ? entityAffinity * 0.15 : entityAffinity * 0.05;
       const boostedScore = Math.max(0, Math.min(1, relevance_score + entityBoost));
 
-      // Fix 1: Bayesian popularity blend — sparse profiles lean on popularity, rich profiles lean on Marble
+      // Bayesian popularity blend — sparse profiles lean on popularity, rich profiles lean on Marble.
+      // Cold-start threshold configurable via constructor; defaults to 10 signals (was 50, which
+      // meant Marble looked identical to popularity for new users until they'd reacted 50+ times).
       const rawPopCount = story.rating_count || story.vote_count || story.num_ratings || story.ratings_count || 0;
       const popularity_score = rawPopCount > 0 ? rawPopCount / maxRatingCount : (story.avg_rating ? story.avg_rating / 5.0 : 0);
       const userSignalCount = (this.kg?.user?.history || this.kg?.history || []).length;
-      const personalization_confidence = Math.min(1.0, userSignalCount / 50);
+      const coldStartThreshold = this.options?.coldStartThreshold ?? 10;
+      const personalization_confidence = Math.min(1.0, userSignalCount / coldStartThreshold);
       const final_score = popularity_score * (1 - personalization_confidence) + boostedScore * personalization_confidence;
 
       return {
@@ -701,55 +708,68 @@ export class Scorer {
   async #interestMatch(story) {
     if (!story.topics?.length) return 0.3; // neutral for untagged
 
-    // Get story content for semantic analysis
     const storyText = `${story.title} ${story.summary || ''}`.trim();
     if (!storyText) return 0.3;
 
-    try {
-      // Get user interests from knowledge graph
-      const userInterests = this.kg.getTopInterests?.() || [];
-      if (!userInterests.length) {
-        // Fallback to topic-based scoring if no interests available
-        const weights = story.topics.map(t => this.kg?.getInterestWeight?.(t) || 0);
-        if (weights.every(w => w === 0)) return 0.1;
-        const max = Math.max(...weights);
-        const matchCount = weights.filter(w => w > 0).length;
-        const multiBonus = Math.min(0.1, matchCount * 0.03);
-        return Math.min(1, max + multiBonus);
-      }
+    // Always compute Jaccard-based keyword overlap (free, no API).
+    // This gives Marble a real signal even without embeddings.
+    const keywordScore = this.#jaccardTopicOverlap(story);
 
-      // Use semantic similarity for matching
-      const interestTexts = userInterests.map(interest =>
-        typeof interest === 'string' ? interest : interest.name || interest.topic
-      ).filter(Boolean);
+    // Try embeddings if available
+    try {
+      const userInterests = this.kg.getTopInterests?.() || [];
+      if (!userInterests.length) return keywordScore;
+
+      const interestTexts = userInterests
+        .map(interest => typeof interest === 'string' ? interest : interest.name || interest.topic)
+        .filter(Boolean);
 
       const bestMatch = await embeddings.findMostSimilar(storyText, interestTexts, 0.2);
 
-      if (bestMatch.similarity > 0) {
-        // Convert similarity score (0-1) to interest match score with some boosting
+      if (bestMatch && bestMatch.similarity > 0) {
         const semanticScore = Math.min(1, bestMatch.similarity * 1.2);
-
-        // Blend with traditional topic matching if available
-        const topicWeights = story.topics.map(t => this.kg?.getInterestWeight?.(t) || 0);
-        const maxTopicWeight = Math.max(0, ...topicWeights);
-
-        // Use the higher of semantic or topic-based score
-        return Math.max(semanticScore, maxTopicWeight * 0.8);
+        // Blend: 40% keyword + 60% semantic when both are available
+        return Math.max(0.4 * keywordScore + 0.6 * semanticScore, keywordScore);
       }
 
-      // Fallback to topic-based matching
-      const weights = story.topics.map(t => this.kg?.getInterestWeight?.(t) || 0);
-      if (weights.every(w => w === 0)) return 0.1;
-      const max = Math.max(...weights);
-      return max * 0.8; // Slightly lower for non-semantic matches
-
+      return keywordScore;
     } catch (error) {
-      // Embeddings unavailable — fall back to topic-based interest matching
-      console.warn(`[scorer] interest match embedding failed (${error.message}), using topic fallback`);
-      const weights = story.topics.map(t => this.kg?.getInterestWeight?.(t) || 0);
+      console.warn(`[scorer] interest match embedding failed (${error.message}), using keyword-only score`);
+      return keywordScore;
+    }
+  }
+
+  /**
+   * Jaccard-style topic overlap: weighted intersection of story topics and user interests.
+   * Free signal — no API calls. Returns a value in [0, 1].
+   */
+  #jaccardTopicOverlap(story) {
+    const itemTopics = new Set((story.topics || []).map(t => t.toLowerCase()));
+    if (itemTopics.size === 0) return 0.1;
+
+    const userInterests = this.kg?.user?.interests || [];
+    if (userInterests.length === 0) {
+      // No registered interests yet — just check direct topic weights
+      const weights = (story.topics || []).map(t => this.kg?.getInterestWeight?.(t) || 0);
       if (weights.every(w => w === 0)) return 0.1;
       return Math.max(...weights) * 0.8;
     }
+
+    let matchSum = 0;
+    let matchCount = 0;
+    for (const interest of userInterests) {
+      if (itemTopics.has((interest.topic || '').toLowerCase())) {
+        matchSum += (interest.weight || 0.5);
+        matchCount++;
+      }
+    }
+
+    if (matchCount === 0) return 0.1;
+
+    // Weighted average of matched interests, lightly boosted by match count
+    const avgMatch = matchSum / matchCount;
+    const multiBonus = Math.min(0.15, matchCount * 0.05);
+    return Math.min(1, avgMatch + multiBonus);
   }
 
   /**
@@ -944,7 +964,7 @@ export class Scorer {
       .map(id => ({ role: id.role, context: id.context, salience: id.salience }));
 
     const history = (kgUser.history || []).slice(-10).map(h => ({
-      title: h.story_id || h.title || h.topic || '',
+      title: h.item_id || h.story_id || h.title || h.topic || '',
       reaction: h.reaction || '',
       topics: h.topics || [],
     }));

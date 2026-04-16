@@ -91,9 +91,9 @@ function _buildDeepSeekClient(opts) {
 
   if (isOllama) {
     // Self-hosted Ollama: uses x-api-key header, bypass OpenAI SDK to avoid auth conflicts.
-    // Disable TLS verification for self-hosted endpoints (e.g. Tailscale self-signed certs).
+    // If you need to accept self-signed TLS certs, set NODE_TLS_REJECT_UNAUTHORIZED=0
+    // in your environment explicitly — Marble will NOT disable TLS verification for you.
     const ollamaBase = baseURL.replace(/\/v1\/?$/, '').replace(/^http:\/\//, 'https://');
-    process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
     return {
       provider: 'deepseek',
       defaultModel: (tier) => defaultModel(tier, 'deepseek'),

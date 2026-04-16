@@ -19,7 +19,7 @@ export class KnowledgeGraph {
   constructor(dataPath) {
     this.dataPath = dataPath;
     this.user = null;
-    this.stories = new Map();
+    this.items = new Map();
     this._topicInsightEngine = null;     // TopicInsightEngine for LLM-powered enrichment
     this._dimensionalPreferences = [];   // DimensionalPreference[] tracking
     this._lastInsightResult = null;      // Last enrichment result for debugging
@@ -100,15 +100,15 @@ export class KnowledgeGraph {
 
   /**
    * Record a reaction and update interest weights
-   * @param {string} storyId - ID of the story being rated
+   * @param {string} itemId - ID of the item being rated
    * @param {string} reaction - Reaction type: 'up', 'down', 'skip', 'share'
-   * @param {string[]} topics - Topic tags for the story
-   * @param {string} source - Source of the story
+   * @param {string[]} topics - Topic tags for the item
+   * @param {string} source - Source of the item
    * @param {Object} [item=null] - Optional item metadata for secondary context extraction
    */
-  recordReaction(storyId, reaction, topics, source, item = null) {
+  recordReaction(itemId, reaction, topics, source, item = null) {
     const historyEntry = {
-      story_id: storyId,
+      item_id: itemId,
       reaction,
       date: new Date().toISOString(),
       topics,
@@ -211,10 +211,11 @@ export class KnowledgeGraph {
   }
 
   /**
-   * Check if user has seen a story recently
+   * Check if user has seen an item recently.
+   * Reads both item_id (new) and story_id (legacy) for backward compatibility.
    */
-  hasSeen(storyId) {
-    return this.user.history.some(h => h.story_id === storyId);
+  hasSeen(itemId) {
+    return this.user.history.some(h => (h.item_id || h.story_id) === itemId);
   }
 
   // ── Layer 1: Typed Memory Node Methods ─────────────

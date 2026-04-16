@@ -26,15 +26,29 @@ export class Marble {
    * @param {Object}   [opts.embeddings] - Embeddings provider for semantic scoring
    * @param {number}   [opts.count=10]   - Number of items to return from select()
    * @param {string}   [opts.mode='score'] - 'score' (v1), 'swarm' (v2), or 'debate' (v2+debate)
+   * @param {boolean}  [opts.arcReorder=false] - Apply narrative arc reranking (newsletter/content curation only)
+   * @param {number}   [opts.coldStartThreshold=10] - Signals needed before full personalization
+   * @param {number}   [opts.cloneBoostWeight=0.3] - How much clone consensus influences scoring
    */
-  constructor({ storage = './marble-kg.json', llm = null, embeddings = null, count = 10, mode = 'score' } = {}) {
+  constructor({
+    storage = './marble-kg.json',
+    llm = null,
+    embeddings = null,
+    count = 10,
+    mode = 'score',
+    arcReorder = false,
+    coldStartThreshold = 10,
+    cloneBoostWeight = 0.3,
+  } = {}) {
     this.kg = new KnowledgeGraph(storage);
-    this.scorer = new Scorer(this.kg);
+    this.scorer = new Scorer(this.kg, { coldStartThreshold });
     this.arc = new ArcReranker();
     this.count = count;
     this.mode = mode;
     this.llm = llm;
     this.embeddings = embeddings;
+    this.arcReorder = arcReorder;
+    this.cloneBoostWeight = Math.max(0, Math.min(1, cloneBoostWeight));
     this.ready = false;
 
     // Lazy-init containers
@@ -101,10 +115,11 @@ export class Marble {
         this.clonePopulation = new ClonePopulation(this.kg, this.llm || (async () => 'no'));
       }
 
+      const w = this.cloneBoostWeight;
       for (const item of scored) {
         const cloneBoost = await this.clonePopulation.predictConsensus(item.story || item, clones);
         const currentScore = item.relevance_score ?? item.magic_score ?? 0;
-        const blended = currentScore * 0.7 + cloneBoost * 0.3;
+        const blended = currentScore * (1 - w) + cloneBoost * w;
         if (item.relevance_score != null) item.relevance_score = blended;
         if (item.magic_score != null) item.magic_score = blended;
       }
@@ -114,7 +129,12 @@ export class Marble {
       );
     }
 
-    return this.arc.reorder(scored, this.count);
+    // Arc reranking is opt-in: only for newsletter/content-curation use cases
+    // where narrative flow matters. For search, product recs, etc., keep pure ranking.
+    if (this.arcReorder) {
+      return this.arc.reorder(scored, this.count);
+    }
+    return scored.slice(0, this.count);
   }
 
   /**
@@ -132,25 +152,23 @@ export class Marble {
   }
 
   /**
-   * Process a full slate of reactions with contrastive analysis.
+   * Process a full batch of reactions with contrastive analysis.
    * This is the mechanism that makes Day 2 better than Day 1.
    *
-   * @param {Array<{ item: Object, reaction: string }>} slateReactions
+   * @param {Array<{ item: Object, reaction: string }>} batchReactions
    * @returns {Promise<{ inferences: Object[], revelations: Object[] }>}
    */
-  async reactSlate(slateReactions) {
+  async feedbackBatch(batchReactions) {
     if (!this.ready) await this.init();
 
     if (!this.llm) {
-      // Without LLM, just record individual reactions
-      for (const { item, reaction } of slateReactions) {
+      for (const { item, reaction } of batchReactions) {
         await this.react(item, reaction);
       }
       return { inferences: [], revelations: [] };
     }
 
-    // Record each reaction in KG with full item
-    for (const { item, reaction } of slateReactions) {
+    for (const { item, reaction } of batchReactions) {
       this.kg.recordReaction(
         item.id || item.title,
         reaction,
@@ -160,7 +178,6 @@ export class Marble {
       );
     }
 
-    // Run contrastive analysis on the full slate
     const { RapidFeedbackEngine } = await import('./rapid-feedback.js');
     if (!this.feedbackEngine) {
       this.feedbackEngine = new RapidFeedbackEngine(this.kg, this.llm, {
@@ -168,9 +185,16 @@ export class Marble {
       });
     }
 
-    const result = await this.feedbackEngine.processSlate(slateReactions);
+    const result = await this.feedbackEngine.processBatch(batchReactions);
     await this.kg.save();
     return result;
+  }
+
+  /**
+   * @deprecated Use feedbackBatch() instead. Kept for backward compatibility.
+   */
+  async reactSlate(slateReactions) {
+    return this.feedbackBatch(slateReactions);
   }
 
   /**
@@ -209,7 +233,7 @@ export class Marble {
     }
 
     const recentReactions = (this.kg.user.history || []).slice(-10).map(h => ({
-      item: { title: h.story_id, topics: h.topics, id: h.story_id },
+      item: { title: h.item_id || h.story_id, topics: h.topics, id: h.item_id || h.story_id },
       reaction: h.reaction,
     }));
 
@@ -305,39 +329,31 @@ export class Marble {
   }
 }
 
-// Backward compat alias
-export const Marblism = Marble;
+// ═══════════════════════════════════════════════════════════
+// TIER 1: Public API (99% of developers only need this)
+// ═══════════════════════════════════════════════════════════
+// export { Marble } // already exported above
 
-// ── Exports ──────────────────────────────────────────────
-
+// ═══════════════════════════════════════════════════════════
+// TIER 2: Core components (direct access for advanced use)
+// ═══════════════════════════════════════════════════════════
 export { KnowledgeGraph } from './kg.js';
 export { Scorer } from './scorer.js';
 export { ArcReranker } from './arc.js';
-export {
-  Swarm, Clone, SwarmAgent, AGENT_LENSES,
-  swarmScore,
-  computeDynamicWeights,
-  detectDomain,
-  generateAgentFleet, invalidateFleetCache, getFleetCacheStats,
-  explodeAgentQuestions,
-} from './swarm.js';
+
+// ═══════════════════════════════════════════════════════════
+// TIER 3: Individual pipeline layers (for composition)
+// ═══════════════════════════════════════════════════════════
+export { Swarm, Clone } from './swarm.js';
 export { ClonePopulation } from './evolution.js';
-export { SignalProcessor } from './signals.js';
-export { Observer } from './observer.js';
-export { SCORE_WEIGHTS, ARC_SLOTS } from './types.js';
-export { CollaborativeFilter } from './collaborative-filter.js';
-export { extractEntityAttributes, attributeCount } from './entity-extractor.js';
-export { detectDomain as detectItemDomain, getDomainSchema, DOMAINS } from './domain-schemas.js';
-export { runInsightSwarm, getL2Seeds } from './insight-swarm.js';
 export { InferenceEngine } from './inference-engine.js';
-export { SimulationQueue } from './simulation-queue.js';
-export { TopicInsightEngine, GapSimulator } from './topic-insight-engine.js';
 export { InvestigativeCommittee } from './investigative-committee.js';
-export { ConversationMiner } from './conversation-miner.js';
 export { RapidFeedbackEngine } from './rapid-feedback.js';
+export { ConversationMiner } from './conversation-miner.js';
 export { MemoryLayers } from './memory-layers.js';
-export { USE_CASE_PROFILES, createProfileConfig, createScorerForUseCase } from './use-case-profiles.js';
-export { cacheWorldContext, getWorldContextCache, checkCacheValidity, getWorldContextOrFallback, invalidateWorldContextCache, getCacheStats } from './world-context-cache.js';
-export { default as LightweightScorer } from './lightweight-scorer.js';
-export { readWorldContext, writeWorldContext, syncBatch, writeSystemAOutput, getSystemAFromCache, getWorldContextFromCache, toWorldSimContext } from './worldsim-bridge.js';
-export { scheduleNightlyCacheRefresh, handleUserDataIngest, getCacheRefreshStatus } from './world-context-scheduler.js';
+
+// ═══════════════════════════════════════════════════════════
+// TIER 4: Types & utilities
+// ═══════════════════════════════════════════════════════════
+export { SCORE_WEIGHTS, ARC_SLOTS } from './types.js';
+export { USE_CASE_PROFILES, createProfileConfig } from './use-case-profiles.js';

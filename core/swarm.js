@@ -616,6 +616,18 @@ Return ONLY a JSON array:
 
 export { Clone, SwarmAgent, AGENT_LENSES };
 
+/**
+ * Convenience wrapper: rank items through the swarm without instantiating.
+ * @param {Object[]} items
+ * @param {Object} kg - KnowledgeGraph instance
+ * @param {Object} [opts] - Swarm options (mode, llm, topN)
+ * @returns {Promise<Object[]>} Ranked items
+ */
+export async function swarmRank(items, kg, opts = {}) {
+  const swarm = new Swarm(kg, opts);
+  return swarm.curate(items);
+}
+
 // ── Genre Overlap Helpers ─────────────────────────────────────────────────────
 
 /**
@@ -1041,7 +1053,7 @@ async function _generateFleetFromLLM(domain, contentSample, kgSummary, llm) {
   }
   if (interests.length) profileParts.push(`Interests: ${interests.join(', ')}`);
   if (recentSignals.length) {
-    const recent = recentSignals.map(h => `${h.title || h.story_id || '?'}: ${h.reaction || '?'}`);
+    const recent = recentSignals.map(h => `${h.title || h.item_id || h.story_id || '?'}: ${h.reaction || '?'}`);
     profileParts.push(`Recent: ${recent.join(', ')}`);
   }
   if (avoidPatterns.length) profileParts.push(`Avoids: ${avoidPatterns.join(', ')}`);
@@ -1286,8 +1298,8 @@ export async function explodeAgentQuestions(agent, contentSample, kgSummary, llm
     typeof i === 'string' ? i : `${i.topic || i.name}${i.trend ? ` (${i.trend})` : ''}`
   ).join(', ');
   const avoidPatterns = (kg.avoidPatterns || kg.avoid_patterns || []).slice(0, 6).join(', ');
-  const likedHistory = (kg.history || []).filter(h => h.reaction === 'up' || h.reaction === 'liked' || h.score > 0.7).slice(-5).map(h => h.title || h.story_id || h.topic || h).join(', ');
-  const dislikedHistory = (kg.history || []).filter(h => h.reaction === 'down' || h.reaction === 'disliked' || h.score < 0.3).slice(-5).map(h => h.title || h.story_id || h.topic || h).join(', ');
+  const likedHistory = (kg.history || []).filter(h => h.reaction === 'up' || h.reaction === 'liked' || h.score > 0.7).slice(-5).map(h => h.title || h.item_id || h.story_id || h.topic || h).join(', ');
+  const dislikedHistory = (kg.history || []).filter(h => h.reaction === 'down' || h.reaction === 'disliked' || h.score < 0.3).slice(-5).map(h => h.title || h.item_id || h.story_id || h.topic || h).join(', ');
   // Typed KG nodes
   const userBeliefs = (kg.beliefs || []).slice(0, 5).map(b => `${b.topic}: ${b.claim} (${b.confidence})`).join(', ');
   const userPreferences = (kg.preferences || []).slice(0, 8).map(p => `${p.description || p.type} (${p.strength > 0 ? '+' : ''}${p.strength})`).join(', ');
@@ -1931,7 +1943,7 @@ function _buildKgSummary(kg) {
 
   // Recent signals from history
   const history = (user.history || []).slice(-10).map(h => ({
-    title: h.story_id || h.title || h.topic || '',
+    title: h.item_id || h.story_id || h.title || h.topic || '',
     reaction: h.reaction || '',
     topics: h.topics || [],
   }));

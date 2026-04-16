@@ -3,7 +3,7 @@
  * test-relationship-simulator.js — Tests for Marble Relationship Simulation Engine
  */
 
-import { RelationshipSimulator } from '../core/relationship-simulator.js';
+import { RelationshipSimulator } from '../experimental/relationship-simulator.js';
 import { KnowledgeGraph } from '../core/kg.js';
 import path from 'path';
 import fs from 'fs';

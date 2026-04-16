@@ -3,7 +3,7 @@
  */
 
 import { Scorer } from '../core/scorer.js';
-import { globalCollaborativeFilter } from '../collaborative-filter.js';
+import { globalCollaborativeFilter } from '../core/collaborative-filter.js';
 
 async function testCFIntegration() {
   console.log('🧪 Testing CF Integration in Marble...\n');

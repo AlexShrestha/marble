@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — API surface polish (OOTB integration pass 4)
+
+- **New `Marble#score(items, context)` public method.** Returns every scored
+  item (not sliced to `count`), sorted descending, without arc reordering.
+  Use this for AUC / MRR evaluations, external rerankers, or any case where
+  you need the full ranking distribution. `select()` is now a thin wrapper
+  around `score()` that applies the count slice and optional arc reorder.
+- **`select()` / `score()` return shape is now documented.** Previous JSDoc
+  said only "Top items, arc-ordered". The new `@returns` typedef spells out
+  the wrapper object: `story` (original item, legacy name), `item` (new
+  non-breaking alias), `relevance_score`, `magic_score`, and any
+  per-dimension components. Callers no longer have to dig into
+  `result[0].<??>` by trial and error.
+- **Non-breaking `item` alias on the result wrapper.** The wrapper field has
+  historically been called `story`, which collides with item bodies that are
+  also sometimes called `story`. Both `.story` and `.item` now point at the
+  original input item on every result, so new code can use `.item`
+  unambiguously. `.story` stays for existing downstream callers.
+
 ### Improved — Scorer on topic-thin data + no-LLM mode (OOTB integration pass 3)
 
 - **`#interestMatch` no longer ties on items with empty `topics`.** When an

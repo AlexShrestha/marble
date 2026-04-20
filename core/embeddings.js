@@ -11,23 +11,86 @@
  * warning) so callers fall through to their keyword/topic-based fallback paths.
  */
 
+// ─── RETRY HELPERS ─────────────────────────────────────────────────────────
+
+const RETRYABLE_HTTP_STATUS = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
+const DEFAULT_RETRY_DELAYS_MS = [250, 1000, 4000];
+
+function _retryAfterMs(headerValue, fallbackMs) {
+  if (!headerValue) return fallbackMs;
+  const asInt = parseInt(headerValue, 10);
+  if (!Number.isNaN(asInt)) return Math.max(asInt * 1000, fallbackMs);
+  const asDate = Date.parse(headerValue);
+  if (!Number.isNaN(asDate)) return Math.max(asDate - Date.now(), fallbackMs);
+  return fallbackMs;
+}
+
+/**
+ * Retry wrapper around fetch for embedding calls. Retries on transient HTTP
+ * statuses (429, 5xx) and network errors with exponential backoff, honoring
+ * Retry-After headers. Does NOT retry on 4xx client errors (401, 403, etc).
+ */
+async function _fetchWithRetry(fetchFn, label = 'embeddings') {
+  let lastErr;
+  const delays = DEFAULT_RETRY_DELAYS_MS;
+  for (let attempt = 0; attempt <= delays.length; attempt++) {
+    try {
+      const res = await fetchFn();
+      if (!res.ok && RETRYABLE_HTTP_STATUS.has(res.status) && attempt < delays.length) {
+        const retryAfter = res.headers.get?.('retry-after');
+        const wait = _retryAfterMs(retryAfter, delays[attempt]);
+        console.warn(`[${label}] ${res.status} — retrying in ${wait}ms (attempt ${attempt + 1}/${delays.length})`);
+        await new Promise(r => setTimeout(r, wait));
+        continue;
+      }
+      return res;
+    } catch (err) {
+      lastErr = err;
+      if (attempt < delays.length) {
+        const wait = delays[attempt];
+        console.warn(`[${label}] network error (${err.message}) — retrying in ${wait}ms (attempt ${attempt + 1}/${delays.length})`);
+        await new Promise(r => setTimeout(r, wait));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr || new Error(`[${label}] exhausted retries`);
+}
+
 /**
  * OpenAI Embeddings provider
  *
  * Uses OpenAI's text-embedding API (text-embedding-3-small by default).
- * Requires OPENAI_API_KEY environment variable.
+ * Requires OPENAI_API_KEY (or OPENAI_EMBEDDINGS_API_KEY for split-provider setups).
+ *
+ * Env-var resolution (most-specific wins):
+ *   apiKey:   OPENAI_EMBEDDINGS_API_KEY → OPENAI_API_KEY
+ *   baseUrl:  OPENAI_EMBEDDINGS_BASE_URL → 'https://api.openai.com/v1'
+ *   model:    OPENAI_EMBEDDINGS_MODEL → OPENAI_EMBEDDING_MODEL → 'text-embedding-3-small'
+ *
+ * Dedicated OPENAI_EMBEDDINGS_* vars let callers point embeddings at one host
+ * while chat is routed through a different OpenAI-compatible host via
+ * LLM_PROVIDER=openai-compatible + LLM_BASE_URL.
  *
  * Output dimensions: 1536 (text-embedding-3-small) or 3072 (text-embedding-3-large)
  */
 class OpenAIEmbeddings {
   constructor(options = {}) {
-    this.apiKey = (options.apiKey !== undefined && options.apiKey !== null) ? options.apiKey : process.env.OPENAI_API_KEY;
-    this.model = options.model || process.env.OPENAI_EMBEDDING_MODEL || 'text-embedding-3-small';
-    this.baseUrl = options.baseUrl || 'https://api.openai.com/v1';
+    this.apiKey = (options.apiKey !== undefined && options.apiKey !== null)
+      ? options.apiKey
+      : (process.env.OPENAI_EMBEDDINGS_API_KEY || process.env.OPENAI_API_KEY);
+    this.model = options.model
+      || process.env.OPENAI_EMBEDDINGS_MODEL
+      || process.env.OPENAI_EMBEDDING_MODEL
+      || 'text-embedding-3-small';
+    this.baseUrl = options.baseUrl
+      || process.env.OPENAI_EMBEDDINGS_BASE_URL
+      || 'https://api.openai.com/v1';
 
     if (!this.apiKey) {
       throw new Error(
-        'OpenAI embeddings require OPENAI_API_KEY. ' +
+        'OpenAI embeddings require OPENAI_API_KEY (or OPENAI_EMBEDDINGS_API_KEY). ' +
         'Set it in your environment or pass apiKey to the constructor.'
       );
     }
@@ -38,14 +101,17 @@ class OpenAIEmbeddings {
 
     const cleanText = text.trim().slice(0, 8191);
 
-    const response = await fetch(`${this.baseUrl}/embeddings`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${this.apiKey}`
-      },
-      body: JSON.stringify({ model: this.model, input: cleanText })
-    });
+    const response = await _fetchWithRetry(
+      () => fetch(`${this.baseUrl}/embeddings`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${this.apiKey}`
+        },
+        body: JSON.stringify({ model: this.model, input: cleanText })
+      }),
+      'embeddings',
+    );
 
     if (!response.ok) {
       throw new Error(`OpenAI embeddings API error: ${response.status} ${await response.text()}`);

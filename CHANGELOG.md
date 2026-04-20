@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — Provider generalization (OOTB integration pass 2)
+
+- **New `openai-compatible` LLM provider.** Any OpenAI-compatible host
+  (Moonshot/Kimi, Together, Fireworks, Groq, OpenRouter, Azure OpenAI,
+  self-hosted vLLM, etc.) is now a first-class citizen. Set
+  `LLM_PROVIDER=openai-compatible`, `LLM_BASE_URL`, `LLM_API_KEY`, and
+  `MARBLE_LLM_MODEL`. No more hijacking the `deepseek` provider to route
+  through third-party endpoints.
+- **Explicit Ollama opt-in.** The old heuristic in `_buildDeepSeekClient`
+  — "any non-DeepSeek base URL must be Ollama" — hijacked every
+  OpenAI-compatible endpoint that users pointed `DEEPSEEK_BASE_URL` at.
+  Ollama routing now requires either `DEEPSEEK_IS_OLLAMA=1` or a base URL
+  whose path looks like Ollama's native shape (`/api`, no `/v1`). Non-matching
+  URLs go through the standard OpenAI SDK path.
+- **Retry with exponential backoff on transient failures.** Both
+  `embeddings.embed()` and the OpenAI-compatible chat wrapper now retry
+  429/408/409/425/5xx responses and network errors three times (250ms, 1s,
+  4s), honoring `Retry-After` headers. 4xx client errors (400, 401, 403,
+  404, 422) are not retried. Previously a single 429 downgraded scorer
+  quality silently for the rest of the run.
+- **Dedicated embeddings env vars for split-provider setups.**
+  `OPENAI_EMBEDDINGS_API_KEY`, `OPENAI_EMBEDDINGS_BASE_URL`, and
+  `OPENAI_EMBEDDINGS_MODEL` let callers point embeddings at real OpenAI
+  while chat goes through an OpenAI-compatible proxy (or vice versa).
+  When unset, `OPENAI_API_KEY` / `OPENAI_EMBEDDING_MODEL` are used as
+  fallback so existing configs keep working unchanged.
+
 ### Fixed — Install-time blockers (OOTB integration pass 1)
 
 - **`.env.example` no longer misrepresents the default embeddings provider.**

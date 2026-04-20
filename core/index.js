@@ -93,13 +93,29 @@ export class Marble {
   }
 
   /**
-   * Score and rank items. Uses clone consensus when clones exist.
+   * Score and rank ALL items without slicing or arc reordering.
    *
-   * @param {Object[]} items - Candidate items (~100)
+   * Use this when you need the full ranking distribution — AUC / MRR
+   * evaluations, external rerankers, or surfacing more than `count` results.
+   * For top-N-with-optional-arc-ordering, use `select()` instead.
+   *
+   * The returned objects preserve the scorer's wrapper shape. Each has:
+   *   - `story`: the original input item (historical name, see `item` alias below)
+   *   - `item`: alias for `story` — use this in new code; `story` will be
+   *     deprecated in a future major
+   *   - `relevance_score`: number in [0, 1], the composite ranking signal
+   *   - `magic_score`: legacy alias of relevance_score kept for back-compat
+   *   - plus per-dimension components (`interest_match`, `temporal_relevance`,
+   *     `popularity_score`, `entity_affinity`, ...) when produced by the
+   *     scorer path; swarm/debate modes may populate a different subset
+   *
+   * Ordered descending by `relevance_score`; ties broken by `popularity_score`.
+   *
+   * @param {Object[]} items - Candidate items
    * @param {Object}   [context] - Ephemeral context (calendar, projects, mood)
-   * @returns {Object[]} Top items, arc-ordered
+   * @returns {Promise<Array<{ story: Object, item: Object, relevance_score: number, magic_score: number, [key: string]: any }>>}
    */
-  async select(items, context) {
+  async score(items, context) {
     if (!this.ready) await this.init();
 
     if (context) {
@@ -112,7 +128,7 @@ export class Marble {
       const swarm = new Swarm(this.kg, {
         mode: this.mode === 'debate' ? 'debate' : 'deep',
         llm: this.llm,
-        topN: this.count,
+        topN: items.length,
       });
       scored = await swarm.curate(items);
     } else {
@@ -140,6 +156,38 @@ export class Marble {
         (b.relevance_score ?? b.magic_score ?? 0) - (a.relevance_score ?? a.magic_score ?? 0)
       );
     }
+
+    // Non-breaking alias: wrapper.story → wrapper.item. Callers can start using
+    // `.item` immediately; `.story` is preserved for existing downstream code
+    // and will be deprecated in a future major version.
+    for (const entry of scored) {
+      if (entry && typeof entry === 'object' && entry.story && entry.item === undefined) {
+        entry.item = entry.story;
+      }
+    }
+
+    return scored;
+  }
+
+  /**
+   * Score and return the top `count` items, with optional arc reordering.
+   *
+   * Convenience wrapper around `score()` for the common "give me the top N"
+   * case. Identical scoring pipeline; differences:
+   *   - returns only the first `this.count` entries
+   *   - applies narrative arc reranking when `arcReorder: true` was passed
+   *     to the constructor (newsletter/content-curation use cases)
+   *
+   * For full-slate output (evaluations, external rerankers, large result
+   * sets), use `score()` instead.
+   *
+   * @param {Object[]} items - Candidate items (~100 typical)
+   * @param {Object}   [context] - Ephemeral context (calendar, projects, mood)
+   * @returns {Promise<Array<{ story: Object, item: Object, relevance_score: number, magic_score: number, [key: string]: any }>>}
+   *   Top `count` items, same wrapper shape as `score()`, optionally arc-ordered.
+   */
+  async select(items, context) {
+    const scored = await this.score(items, context);
 
     // Arc reranking is opt-in: only for newsletter/content-curation use cases
     // where narrative flow matters. For search, product recs, etc., keep pure ranking.

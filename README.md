@@ -143,6 +143,13 @@ const stats = await marble.learn();
 // { insights: 7, candidates: 4, clones: 12 }
 ```
 
+> **`learn()` is required for the "Day 2 > Day 1" progressive improvement claim.**
+> `react()` and `feedbackBatch()` record signals into the KG, but the clone
+> population, inference engine, and insight swarm only update when you call
+> `learn()`. A typical integration calls `learn()` after every N reactions
+> (e.g. N=10) or on a daily schedule. Without it, ranking relies on interest
+> aggregation alone and will not show clone-driven improvements over time.
+
 **Run tests:**
 
 ```bash
@@ -152,8 +159,8 @@ cd marble && npm install && npm test
 
 ## Features
 
-- **Zero API keys** — Core scoring runs locally with ONNX embeddings
-- **Privacy-first** — All computation happens on your machine
+- **Pluggable providers** — Anthropic, OpenAI, DeepSeek, or any OpenAI-compatible host (Moonshot, Together, Fireworks, Groq, OpenRouter, Azure, vLLM) for LLM; OpenAI or DeepSeek for embeddings
+- **Privacy-first** — All user state stays on your machine; only per-item scoring/enrichment calls go out to the provider you configure
 - **Three modes** — Score (fast), Swarm (rich), WorldSim (B2B PMF)
 - **Implicit learning** — Learns from dwell time, scroll depth, forwards, silence
 - **Insight-driven KG** — Reasons about WHY, not just WHAT (see [docs/insight-kg.md](docs/insight-kg.md))

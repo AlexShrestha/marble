@@ -708,13 +708,47 @@ export class Scorer {
 
   /**
    * How well does this story match the user's interest graph?
-   * Uses semantic embeddings for better matching (e.g., "EU digital markets act" matches "Shopify compliance")
+   * Uses semantic embeddings for better matching (e.g., "EU digital markets act" matches "Shopify compliance").
+   *
+   * When the item has no topics (common for RSS without tags, text-only sources,
+   * user-generated content), we still try to rank semantically against user
+   * interests using the item's title/summary text — previously this path
+   * returned a flat 0.3, which caused entire candidate sets to tie on this
+   * component and kill ranking differentiation.
+   *
    * @deprecated - kept for backward compatibility, use #computeTypedAlignments instead
    */
   async #interestMatch(story) {
-    if (!story.topics?.length) return 0.3; // neutral for untagged
+    const storyText = `${story.title || ''} ${story.summary || ''}`.trim();
 
-    const storyText = `${story.title} ${story.summary || ''}`.trim();
+    // Topic-less item: fall back to pure semantic match against user interests.
+    // Only degrade to the neutral 0.3 when we have neither text nor interests to
+    // compare against.
+    if (!story.topics?.length) {
+      if (!storyText) return 0.3;
+      try {
+        const userInterests = this.kg.getTopInterests?.() || [];
+        if (!userInterests.length) return 0.3;
+
+        const interestTexts = userInterests
+          .map(i => typeof i === 'string' ? i : i.name || i.topic)
+          .filter(Boolean);
+        if (!interestTexts.length) return 0.3;
+
+        const bestMatch = await this.embeddings.findMostSimilar(storyText, interestTexts, 0.2);
+        if (bestMatch && bestMatch.similarity > 0) {
+          return Math.min(1, bestMatch.similarity * 1.2);
+        }
+        // Semantic check ran but returned no match above threshold — signal is
+        // genuinely weak, but still non-zero so the outer score composition can
+        // use popularity/recency/etc. to differentiate.
+        return 0.15;
+      } catch (error) {
+        console.warn(`[scorer] topic-less interest match failed (${error.message}), using neutral score`);
+        return 0.3;
+      }
+    }
+
     if (!storyText) return 0.3;
 
     // Always compute Jaccard-based keyword overlap (free, no API).

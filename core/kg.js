@@ -33,6 +33,51 @@ function _extractJSON(text, shape = 'object') {
   try { return JSON.parse(m[0]); } catch { return null; }
 }
 
+// Minimal English stopword list for the no-LLM keyword fallback. Kept tiny to
+// avoid pulling in a dependency; the goal is "better than empty", not
+// production-grade NLP.
+const _STOPWORDS = new Set([
+  'a','an','the','and','or','but','if','then','than','so','of','to','for','in',
+  'on','at','by','with','from','about','into','over','under','between','through',
+  'is','are','was','were','be','been','being','have','has','had','do','does','did',
+  'will','would','could','should','may','might','must','can','cannot','this','that',
+  'these','those','i','you','he','she','it','we','they','them','their','our','your',
+  'my','me','us','as','not','no','yes','also','just','very','really','its','it\'s',
+  'up','down','out','off','too','any','some','all','more','most','much','many',
+  'one','two','three','like','get','got','go','going','gone','see','seen','saw',
+  'make','made','take','taken','took','find','found','come','came','come','gone',
+  'new','old','now','then','here','there','where','when','what','why','how','who',
+  'which','whose','been','being','being','not','don','doesn','isn','wasn','weren',
+]);
+
+/**
+ * Lightweight keyword extractor for the no-LLM mode. Splits on non-word chars,
+ * drops short tokens and stopwords, returns up to `limit` most-frequent tokens.
+ *
+ * This is a deliberately simple fallback — when no TopicInsightEngine is wired
+ * and the caller hands `react()` an item with no `topics`, we at least derive
+ * something the scorer can use rather than leaving the KG completely topic-thin.
+ *
+ * @param {string} text
+ * @param {number} [limit=5]
+ * @returns {string[]}
+ */
+function _extractKeywordsFromText(text, limit = 5) {
+  if (!text || typeof text !== 'string') return [];
+  const freq = new Map();
+  const tokens = text.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+  for (const t of tokens) {
+    if (t.length < 3) continue;
+    if (_STOPWORDS.has(t)) continue;
+    if (/^\d+$/.test(t)) continue;
+    freq.set(t, (freq.get(t) || 0) + 1);
+  }
+  return [...freq.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, limit)
+    .map(([k]) => k);
+}
+
 export class KnowledgeGraph {
   constructor(dataPath) {
     this.dataPath = dataPath;
@@ -125,12 +170,34 @@ export class KnowledgeGraph {
    * @param {Object} [item=null] - Optional item metadata for secondary context extraction
    */
   recordReaction(itemId, reaction, topics, source, item = null) {
+    // No-LLM keyword fallback: when no TopicInsightEngine is wired and the
+    // caller provided no topics, derive a small keyword set from the item's
+    // title/summary so the interest graph gets a signal (otherwise every
+    // reaction in no-LLM mode contributes zero to the scorer's interest match).
+    // Marked derivedTopics on the history entry so downstream code can weight
+    // them lower if desired — they are a heuristic fallback, not user-curated.
+    let effectiveTopics = topics;
+    let derivedTopics = false;
+    if (
+      (!effectiveTopics || effectiveTopics.length === 0) &&
+      !this._topicInsightEngine &&
+      item
+    ) {
+      const text = `${item.title || ''} ${item.summary || item.description || ''}`.trim();
+      const kws = _extractKeywordsFromText(text);
+      if (kws.length) {
+        effectiveTopics = kws;
+        derivedTopics = true;
+      }
+    }
+
     const historyEntry = {
       item_id: itemId,
       reaction,
       date: new Date().toISOString(),
-      topics,
-      source
+      topics: effectiveTopics,
+      source,
+      ...(derivedTopics && { topics_derived: true }),
     };
 
     // Extract and store secondary context if item metadata provided
@@ -155,12 +222,15 @@ export class KnowledgeGraph {
 
     this.user.history.push(historyEntry);
 
-    // Update interest weights based on reaction
-    for (const topic of topics) {
+    // Update interest weights based on reaction. Derived-keyword topics get a
+    // dampened boost (half the normal rate) since they are heuristic, not
+    // user-declared.
+    const boostMultiplier = derivedTopics ? 0.5 : 1.0;
+    for (const topic of effectiveTopics || []) {
       if (reaction === 'up' || reaction === 'share') {
-        this.boostInterest(topic, reaction === 'share' ? 0.15 : 0.1);
+        this.boostInterest(topic, (reaction === 'share' ? 0.15 : 0.1) * boostMultiplier);
       } else if (reaction === 'down') {
-        this.decayInterest(topic, 0.05);
+        this.decayInterest(topic, 0.05 * boostMultiplier);
       }
     }
 

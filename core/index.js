@@ -319,7 +319,14 @@ export class Marble {
    *   candidates: number,
    *   clones: number,
    *   stages: { seedClones: 'skipped'|'ok'|'failed', insightSwarm: 'ok'|'failed', inference: 'ok'|'failed', cloneEvolution: 'skipped'|'ok'|'failed' },
-   *   failures: Array<{ stage: string, code?: string, message: string }>
+   *   failures: Array<{ stage: string, code?: string, message: string }>,
+   *   changes: {
+   *     beliefs_added: number, beliefs_invalidated: number,
+   *     preferences_added: number, preferences_invalidated: number,
+   *     identities_added: number, identities_invalidated: number,
+   *     clones_seeded: number, clones_bred: number, clones_killed: number,
+   *     insights_generated: number, candidates_generated: number
+   *   }
    * }>}
    */
   async learn(opts = {}) {
@@ -343,6 +350,22 @@ export class Marble {
         message: err?.message || String(err),
       });
     };
+
+    // Change tracking. Snapshot per-id clone status (not just counts) so
+    // `clones_killed` can distinguish "killed this run" from "already killed".
+    // Counting valid_to-set facts before/after gives us invalidation deltas
+    // that are otherwise invisible once they're merged into the KG.
+    const snapshotCounts = () => ({
+      beliefs_total: this.kg.user.beliefs.length,
+      beliefs_invalidated: this.kg.user.beliefs.filter(b => b.valid_to).length,
+      preferences_total: this.kg.user.preferences.length,
+      preferences_invalidated: this.kg.user.preferences.filter(p => p.valid_to).length,
+      identities_total: this.kg.user.identities.length,
+      identities_invalidated: this.kg.user.identities.filter(i => i.valid_to).length,
+    });
+    const before = snapshotCounts();
+    const cloneStatusBefore = new Map();
+    for (const c of this.kg.user.clones || []) cloneStatusBefore.set(c.id, c.status);
 
     // Seed clones if none exist. Persist the returned array — historically
     // the result was discarded, so seeded clones never reached `user.clones`
@@ -422,14 +445,45 @@ export class Marble {
       pushFailure('cloneEvolution', err);
     }
 
+    // Stamp before save so the timestamp hits disk.
+    this.kg.user._last_learn_at = new Date().toISOString();
     await this.kg.save();
 
+    // Compute change deltas. Separating seed vs bred requires looking at
+    // `spawnedFrom` on the new clones, and counting kills means diffing the
+    // status map per-id. Plain count subtraction can't distinguish these.
+    const after = snapshotCounts();
+    const allClonesAfter = this.kg.user.clones || [];
+    const newClones = allClonesAfter.filter(c => !cloneStatusBefore.has(c.id));
+    const clones_seeded = newClones.filter(c => !c.spawnedFrom).length;
+    const clones_bred = newClones.filter(c => c.spawnedFrom).length;
+    const clones_killed = allClonesAfter.filter(c =>
+      c.status === 'killed' &&
+      cloneStatusBefore.has(c.id) &&
+      cloneStatusBefore.get(c.id) !== 'killed'
+    ).length;
+
+    const changes = {
+      beliefs_added: Math.max(0, after.beliefs_total - before.beliefs_total),
+      beliefs_invalidated: Math.max(0, after.beliefs_invalidated - before.beliefs_invalidated),
+      preferences_added: Math.max(0, after.preferences_total - before.preferences_total),
+      preferences_invalidated: Math.max(0, after.preferences_invalidated - before.preferences_invalidated),
+      identities_added: Math.max(0, after.identities_total - before.identities_total),
+      identities_invalidated: Math.max(0, after.identities_invalidated - before.identities_invalidated),
+      clones_seeded,
+      clones_bred,
+      clones_killed,
+      insights_generated: Array.isArray(insights) ? insights.length : 0,
+      candidates_generated: Array.isArray(candidates) ? candidates.length : 0,
+    };
+
     const result = {
-      insights: Array.isArray(insights) ? insights.length : 0,
-      candidates: Array.isArray(candidates) ? candidates.length : 0,
+      insights: changes.insights_generated,
+      candidates: changes.candidates_generated,
       clones: this.kg.getActiveClones().length,
       stages,
       failures,
+      changes,
     };
 
     if (!allowDegraded && failures.length > 0) {
@@ -471,8 +525,107 @@ export class Marble {
     }
 
     const result = await committee.investigate();
+    this.kg.user._last_investigate_at = new Date().toISOString();
     await this.kg.save();
     return result;
+  }
+
+  /**
+   * Summarise KG health — counts, provenance coverage, decay distribution,
+   * last-run timestamps. Answers the question "did the pipeline actually do
+   * anything useful?" without requiring consumers to poke at internals.
+   *
+   * Returns a plain object; no side effects.
+   *
+   * @returns {{
+   *   version: number,
+   *   facts: {
+   *     beliefs: { total: number, active: number, invalidated: number, with_evidence: number, with_valid_from: number },
+   *     preferences: { total: number, active: number, invalidated: number, with_evidence: number, with_valid_from: number },
+   *     identities: { total: number, active: number, invalidated: number, with_evidence: number, with_valid_from: number }
+   *   },
+   *   episodes: { total: number },
+   *   clones: { active: number, killed: number, total: number },
+   *   decay: { threshold: number, half_life_days: number, below_threshold: number },
+   *   gaps: { open: number },
+   *   last_learn_at: string|null,
+   *   last_investigate_at: string|null,
+   *   days_since_last_learn: number|null,
+   *   days_since_last_investigate: number|null
+   * }}
+   */
+  diagnose() {
+    const kg = this.kg;
+    if (!kg.user) {
+      throw new Error('diagnose() called before init(). Call marble.init() first.');
+    }
+
+    const summariseCollection = (arr, keyFn) => {
+      const active = arr.filter(f => !f.valid_to);
+      return {
+        total: arr.length,
+        active: active.length,
+        invalidated: arr.length - active.length,
+        with_evidence: arr.filter(f => Array.isArray(f.evidence) && f.evidence.length > 0).length,
+        with_valid_from: arr.filter(f => f.valid_from).length,
+      };
+    };
+
+    const beliefs = kg.user.beliefs || [];
+    const preferences = kg.user.preferences || [];
+    const identities = kg.user.identities || [];
+    const clones = kg.user.clones || [];
+    const episodes = kg.user.episodes || [];
+
+    // Decay: how many active facts would be filtered out if the threshold
+    // were raised to the configured `minEffectiveStrength`. This compares
+    // "nothing filtered" (threshold=0) to "default threshold applied" to
+    // tell consumers what fraction of their active view is effectively stale.
+    const allActiveNow = [
+      ...kg.getActiveBeliefs(null, { minEffectiveStrength: 0 }),
+      ...kg.getActivePreferences(null, { minEffectiveStrength: 0 }),
+      ...kg.getActiveIdentities(null, { minEffectiveStrength: 0 }),
+    ];
+    const threshold = kg.decayConfig?.minEffectiveStrength ?? 0;
+    const below_threshold = allActiveNow.filter(f =>
+      typeof f.effective_strength === 'number' && f.effective_strength < threshold
+    ).length;
+
+    const openGaps = beliefs.filter(b => !b.valid_to && typeof b.topic === 'string' && b.topic.startsWith('gap:')).length;
+
+    const lastLearn = kg.user._last_learn_at || null;
+    const lastInvestigate = kg.user._last_investigate_at || null;
+    const daysSince = (iso) => {
+      if (!iso) return null;
+      const t = new Date(iso).getTime();
+      if (!Number.isFinite(t)) return null;
+      return (Date.now() - t) / 86_400_000;
+    };
+
+    return {
+      version: kg.version ?? 0,
+      facts: {
+        beliefs: summariseCollection(beliefs),
+        preferences: summariseCollection(preferences),
+        identities: summariseCollection(identities),
+      },
+      episodes: { total: episodes.length },
+      clones: {
+        active: clones.filter(c => c.status === 'active').length,
+        killed: clones.filter(c => c.status === 'killed').length,
+        total: clones.length,
+      },
+      decay: {
+        threshold,
+        half_life_days: kg.decayConfig?.halfLifeDays ?? null,
+        below_threshold,
+      },
+      gaps: { open: openGaps },
+      last_learn_at: lastLearn,
+      last_investigate_at: lastInvestigate,
+      days_since_last_learn: daysSince(lastLearn),
+      days_since_last_investigate: daysSince(lastInvestigate),
+    };
   }
 
   /**

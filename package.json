@@ -4,6 +4,9 @@
   "description": "Give us a name and an email. We figure out who they really are and what they actually need.",
   "type": "module",
   "main": "core/index.js",
+  "bin": {
+    "marble": "bin/marble.mjs"
+  },
   "scripts": {
     "start": "node api/server.js",
     "test": "node --test test/*.test.js",

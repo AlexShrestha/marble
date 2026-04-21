@@ -21,7 +21,7 @@ import { embeddings as defaultEmbeddings } from './embeddings.js';
  * On-disk schema version. Bump when the saved JSON shape changes in a way that
  * requires migration, and add a case to `#migrate()` below.
  */
-export const KG_VERSION = 1;
+export const KG_VERSION = 2;
 
 /**
  * Default reconciliation rules — a conservative starter set that marks the
@@ -62,6 +62,17 @@ export const DEFAULT_RECONCILIATION_RULES = {
 export const DEFAULT_DECAY_CONFIG = {
   halfLifeDays: 365,
   minEffectiveStrength: 0,
+};
+
+/**
+ * Default entity-resolution config. Opt-in: unless `enabled: true`, none of
+ * the resolution paths run and the KG behaves exactly as before. The threshold
+ * applies to the embedding-similarity tier; acronym and exact-match tiers are
+ * always deterministic.
+ */
+export const DEFAULT_ENTITY_RESOLUTION = {
+  enabled: false,
+  threshold: 0.85,
 };
 
 /**
@@ -278,6 +289,10 @@ export class KnowledgeGraph {
     // Decay config — overridable per-instance so consumers with long-lived
     // facts (preferences that rarely change) can use a longer half-life.
     this.decayConfig = { ...DEFAULT_DECAY_CONFIG, ...(opts.decayConfig || {}) };
+    // Entity resolution is opt-in. When disabled (default), resolveEntity()
+    // and the entity-aware codepaths below are no-ops so existing consumers
+    // see no behaviour change.
+    this.entityResolution = { ...DEFAULT_ENTITY_RESOLUTION, ...(opts.entityResolution || {}) };
   }
 
   /**
@@ -312,10 +327,14 @@ export class KnowledgeGraph {
    *
    * Migration map:
    *   0 → 1: add `episodes: []` to user
+   *   1 → 2: add `entities: []` to user
    */
   #migrate() {
     if (this.version < 1) {
       if (!Array.isArray(this.user.episodes)) this.user.episodes = [];
+    }
+    if (this.version < 2) {
+      if (!Array.isArray(this.user.entities)) this.user.entities = [];
     }
     this.version = KG_VERSION;
   }
@@ -535,12 +554,21 @@ export class KnowledgeGraph {
   addBelief(topic, claim, strength = 0.7, opts = {}) {
     const now = new Date().toISOString();
     const validFrom = opts.validFrom || now;
-    const active = this.user.beliefs.find(b =>
-      b.topic.toLowerCase() === topic.toLowerCase() && !b.valid_to
-    );
+    // When an entity id is attached, treat two facts with matching
+    // (topic, entity_id) as the same fact even if the raw claim string
+    // differs. This is how "school=BSB" + "school=British School Barcelona"
+    // collapse to a single active belief.
+    const matchesSame = (b) => {
+      if (b.topic.toLowerCase() !== topic.toLowerCase() || b.valid_to) return false;
+      if (opts.entityId && b.entity_id) return b.entity_id === opts.entityId;
+      return b.claim === claim;
+    };
+    const matchesSlot = (b) =>
+      b.topic.toLowerCase() === topic.toLowerCase() && !b.valid_to;
+    const active = this.user.beliefs.find(matchesSlot);
 
     if (active) {
-      if (active.claim === claim) {
+      if (matchesSame(active)) {
         // Reinforce existing belief
         active.strength = Math.min(1, strength);
         active.evidence_count = (active.evidence_count || 0) + 1;
@@ -561,6 +589,7 @@ export class KnowledgeGraph {
       valid_to: null,
       recorded_at: now,
       evidence: [],
+      ...(opts.entityId ? { entity_id: opts.entityId } : {}),
     };
     if (opts.episodeId) this.#linkEvidence(fact, opts.episodeId);
     this.user.beliefs.push(fact);
@@ -615,11 +644,15 @@ export class KnowledgeGraph {
   addPreference(type, description, strength = 0.7, opts = {}) {
     const now = new Date().toISOString();
     const validFrom = opts.validFrom || now;
-    const active = this.user.preferences.find(p =>
-      p.type.toLowerCase() === type.toLowerCase() &&
-      p.description.toLowerCase() === description.toLowerCase() &&
-      !p.valid_to
-    );
+    // Entity-aware matching: two preferences with the same type that resolve
+    // to the same entity are "the same" even if their description strings
+    // differ. Without an entity id, fall back to the exact desc match that
+    // has always been here.
+    const active = this.user.preferences.find(p => {
+      if (p.type.toLowerCase() !== type.toLowerCase() || p.valid_to) return false;
+      if (opts.entityId && p.entity_id) return p.entity_id === opts.entityId;
+      return p.description.toLowerCase() === description.toLowerCase();
+    });
 
     if (active) {
       // Reinforce — update strength in place
@@ -636,6 +669,7 @@ export class KnowledgeGraph {
       valid_to: null,
       recorded_at: now,
       evidence: [],
+      ...(opts.entityId ? { entity_id: opts.entityId } : {}),
     };
     if (opts.episodeId) this.#linkEvidence(fact, opts.episodeId);
     this.user.preferences.push(fact);
@@ -684,9 +718,11 @@ export class KnowledgeGraph {
       i.role.toLowerCase() === role.toLowerCase() && !i.valid_to
     );
 
+    const contextMatchesEntity = active && opts.entityId && active.entity_id === opts.entityId;
     if (active) {
-      if (active.context === context) {
-        // Reinforce
+      if (active.context === context || contextMatchesEntity) {
+        // Reinforce — either exact context match, or the entity id matches
+        // so different phrasings of the same thing count as the same fact.
         active.salience = Math.min(1, salience);
         active.recorded_at = now;
         if (opts.episodeId) this.#linkEvidence(active, opts.episodeId);
@@ -703,6 +739,7 @@ export class KnowledgeGraph {
       valid_to: null,
       recorded_at: now,
       evidence: [],
+      ...(opts.entityId ? { entity_id: opts.entityId } : {}),
     };
     if (opts.episodeId) this.#linkEvidence(fact, opts.episodeId);
     this.user.identities.push(fact);
@@ -889,7 +926,11 @@ export class KnowledgeGraph {
 
     const sweep = (collection, ruleMap, keyFn) => {
       // Bucket active facts by lowercase slot key. Only enforce on slots the
-      // consumer explicitly marked 'one'.
+      // consumer explicitly marked 'one'. Entity ids affect equivalence at
+      // `addBelief/Preference/Identity` time (in-place reinforcement when
+      // two calls share an entity_id under the same slot); `reconcile()`
+      // stays slot-based because a 'one' slot means "exactly one active
+      // fact" regardless of which entity it refers to.
       const buckets = new Map();
       for (const fact of collection) {
         if (fact.valid_to) continue;
@@ -926,6 +967,166 @@ export class KnowledgeGraph {
       preferences_invalidated: sweep(this.user.preferences, merged.preferences, f => f.type),
       identities_invalidated: sweep(this.user.identities, merged.identities, f => f.role),
     };
+  }
+
+  // ── Entity resolution (alias clustering) ───────────────
+
+  /**
+   * Resolve a label to a canonical entity id, creating one if no match
+   * exists. Matching tiers, in order:
+   *
+   *   1. Exact match (case-insensitive, whitespace-normalised) on canonical
+   *      or any alias.
+   *   2. Acronym match: "BSB" matches "British School Barcelona" when every
+   *      letter of the shorter form is the first letter of a significant
+   *      word in the longer form (in order).
+   *   3. Embedding similarity ≥ `threshold` — only when an embeddings
+   *      provider is available and the shorter label is non-trivial
+   *      (>=3 chars). Skipped silently otherwise.
+   *
+   * The aliases list on the matched entity grows with every novel phrasing
+   * seen, so "her school" alongside existing "British School Barcelona" +
+   * "BSB" converges to a single entity with three aliases after three
+   * resolutions.
+   *
+   * Works regardless of `entityResolution.enabled` — that flag only gates
+   * whether the ingest pipeline calls this method automatically. Consumers
+   * can always call it by hand.
+   *
+   * @param {string} label
+   * @param {Object} [opts]
+   * @param {Float32Array} [opts.embedding] - Pre-computed embedding for `label`.
+   *   Reuse across many calls by passing it explicitly — skips one API call.
+   * @param {Object} [opts.embeddings] - Provider override; defaults to the
+   *   module-level singleton.
+   * @param {number} [opts.threshold] - Overrides `entityResolution.threshold`.
+   * @returns {Promise<{ id: string, canonical: string, matched_via: 'exact'|'acronym'|'embedding'|'created' }>}
+   */
+  async resolveEntity(label, opts = {}) {
+    const text = String(label || '').trim();
+    if (!text) throw new Error('resolveEntity: empty label');
+    if (!Array.isArray(this.user.entities)) this.user.entities = [];
+
+    const norm = this.#normalizeLabel(text);
+
+    // Tier 1: exact (canonical or alias, case-insensitive)
+    for (const ent of this.user.entities) {
+      if (this.#normalizeLabel(ent.canonical) === norm) {
+        return { id: ent.id, canonical: ent.canonical, matched_via: 'exact' };
+      }
+      if ((ent.aliases || []).some(a => this.#normalizeLabel(a) === norm)) {
+        return { id: ent.id, canonical: ent.canonical, matched_via: 'exact' };
+      }
+    }
+
+    // Tier 2: acronym (handles "BSB" ↔ "British School Barcelona")
+    for (const ent of this.user.entities) {
+      const candidates = [ent.canonical, ...(ent.aliases || [])];
+      for (const cand of candidates) {
+        if (this.#isAcronymMatch(text, cand) || this.#isAcronymMatch(cand, text)) {
+          // Record the novel phrasing so future exact-match calls hit.
+          if (!ent.aliases?.some(a => this.#normalizeLabel(a) === norm)) {
+            ent.aliases = [...(ent.aliases || []), text];
+          }
+          return { id: ent.id, canonical: ent.canonical, matched_via: 'acronym' };
+        }
+      }
+    }
+
+    // Tier 3: embedding similarity. Skip gracefully when no provider.
+    const threshold = opts.threshold ?? this.entityResolution.threshold;
+    const provider = opts.embeddings || defaultEmbeddings;
+    let embedding = opts.embedding;
+    if (!embedding && text.length >= 3 && provider && typeof provider.embed === 'function') {
+      try { embedding = await provider.embed(text); } catch { embedding = null; }
+    }
+    if (embedding && embedding.length > 0) {
+      let best = null;
+      let bestScore = -Infinity;
+      for (const ent of this.user.entities) {
+        if (!ent.embedding || ent.embedding.length === 0) continue;
+        const entVec = ent.embedding instanceof Float32Array
+          ? ent.embedding
+          : Float32Array.from(ent.embedding);
+        if (entVec.length !== embedding.length) continue;
+        const sim = this.#cosineSimilarity(embedding, entVec);
+        if (sim > bestScore) { best = ent; bestScore = sim; }
+      }
+      if (best && bestScore >= threshold) {
+        if (!best.aliases?.some(a => this.#normalizeLabel(a) === norm)) {
+          best.aliases = [...(best.aliases || []), text];
+        }
+        return { id: best.id, canonical: best.canonical, matched_via: 'embedding' };
+      }
+    }
+
+    // No match — create a new canonical entity. Persist embedding as a plain
+    // array so it survives JSON.stringify; rehydrated to Float32Array on use.
+    const id = `ent_${Date.now()}_${this.user.entities.length}`;
+    const record = {
+      id,
+      canonical: text,
+      aliases: [],
+      ...(embedding && embedding.length > 0 ? { embedding: Array.from(embedding) } : {}),
+    };
+    this.user.entities.push(record);
+    return { id, canonical: text, matched_via: 'created' };
+  }
+
+  /**
+   * Manually register that `alias` refers to the same entity as `canonical`.
+   * Creates the canonical entity on the fly if it doesn't yet exist. Useful
+   * when the consumer has prior knowledge that the automatic tiers would miss
+   * (e.g. project code-names, personal nicknames).
+   *
+   * @param {string} canonical
+   * @param {string} alias
+   * @returns {string} the entity id
+   */
+  registerEntityAlias(canonical, alias) {
+    if (!Array.isArray(this.user.entities)) this.user.entities = [];
+    const normCanonical = this.#normalizeLabel(canonical);
+    let ent = this.user.entities.find(e => this.#normalizeLabel(e.canonical) === normCanonical);
+    if (!ent) {
+      ent = { id: `ent_${Date.now()}_${this.user.entities.length}`, canonical, aliases: [] };
+      this.user.entities.push(ent);
+    }
+    const normAlias = this.#normalizeLabel(alias);
+    if (!ent.aliases.some(a => this.#normalizeLabel(a) === normAlias)) {
+      ent.aliases.push(alias);
+    }
+    return ent.id;
+  }
+
+  /**
+   * Look up an entity by id.
+   * @param {string} id
+   * @returns {Object|null}
+   */
+  getEntity(id) {
+    return (this.user.entities || []).find(e => e.id === id) || null;
+  }
+
+  #normalizeLabel(s) {
+    return String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  }
+
+  /**
+   * True if `short` is a plausible acronym of `long`. Matches the uppercase
+   * letters of `short` against the first letter of each significant word in
+   * `long` (skipping short stopwords like 'of', 'the', 'and'). Case-sensitive
+   * on `short` to avoid matching lowercase coincidences like "bsb" against
+   * "blue sandy beach".
+   */
+  #isAcronymMatch(short, long) {
+    if (!short || !long) return false;
+    const clean = short.replace(/[^A-Za-z]/g, '');
+    if (clean.length < 2 || clean.length > 6) return false;
+    if (clean !== clean.toUpperCase()) return false; // must be all-caps to count as acronym
+    const words = long.split(/\s+/).filter(w => w.length > 0 && !_STOPWORDS.has(w.toLowerCase()));
+    if (words.length < clean.length) return false;
+    const firstLetters = words.slice(0, clean.length).map(w => w[0].toUpperCase()).join('');
+    return firstLetters === clean;
   }
 
   /**
@@ -1325,7 +1526,8 @@ export class KnowledgeGraph {
       identities: [],     // Identity attributes: { role, context, salience (0-1), evidence: [episode_id] }
       confidence: {},     // Confidence by domain: { domain: confidence_score (0-1) }
       clones: [],         // UserClone hypothesis array
-      episodes: []        // Source records: { id, source, source_date, ingested_at, content_hash, content_summary?, metadata? }
+      episodes: [],       // Source records: { id, source, source_date, ingested_at, content_hash, content_summary?, metadata? }
+      entities: []        // Canonical entities: { id, canonical, aliases: [], embedding? } — collapses "BSB" ↔ "British School Barcelona"
     };
   }
 

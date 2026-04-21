@@ -11,7 +11,7 @@ import assert from 'node:assert/strict';
 import { unlink } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { Marble } from '../core/index.js';
+import { Marble, KG_VERSION } from '../core/index.js';
 
 function mockLLM(responses = []) {
   let i = 0;
@@ -25,7 +25,7 @@ describe('marble.diagnose()', () => {
     await marble.init();
 
     const report = marble.diagnose();
-    assert.equal(report.version, 1);
+    assert.equal(report.version, KG_VERSION);
     assert.deepEqual(report.facts.beliefs, {
       total: 0, active: 0, invalidated: 0, with_evidence: 0, with_valid_from: 0,
     });

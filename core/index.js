@@ -11,7 +11,7 @@
  *   7. investigate(opts)         → adaptive committee fills gaps
  */
 
-import { KnowledgeGraph, DEFAULT_RECONCILIATION_RULES, DEFAULT_DECAY_CONFIG } from './kg.js';
+import { KnowledgeGraph, DEFAULT_RECONCILIATION_RULES, DEFAULT_DECAY_CONFIG, DEFAULT_ENTITY_RESOLUTION } from './kg.js';
 import { Scorer } from './scorer.js';
 import { ArcReranker } from './arc.js';
 import { Swarm } from './swarm.js';
@@ -71,6 +71,14 @@ export class Marble {
    *   `{ halfLifeDays, minEffectiveStrength }`. Defaults to half-life 365
    *   days, threshold 0 (no filtering — back-compat preserved). Raise the
    *   threshold to drop stale facts from the active view.
+   * @param {Object}   [opts.entityResolution] - Alias-clustering config.
+   *   Shape: `{ enabled, threshold }`. Opt-in (default `enabled: false`).
+   *   When enabled, ingest pipelines call `kg.resolveEntity()` on every
+   *   extracted value and stamp `entity_id` on the resulting fact, so
+   *   "BSB" and "British School Barcelona" under the same slot collapse
+   *   into a single active fact with three aliases instead of three
+   *   separate facts. Embedding similarity is used when an embeddings
+   *   provider is available; exact + acronym tiers work without one.
    */
   constructor({
     storage = './marble-kg.json',
@@ -84,8 +92,9 @@ export class Marble {
     silent = false,
     reconciliationRules = DEFAULT_RECONCILIATION_RULES,
     decayConfig = DEFAULT_DECAY_CONFIG,
+    entityResolution = DEFAULT_ENTITY_RESOLUTION,
   } = {}) {
-    this.kg = new KnowledgeGraph(storage, { decayConfig });
+    this.kg = new KnowledgeGraph(storage, { decayConfig, entityResolution });
     this.scorer = new Scorer(this.kg, { coldStartThreshold, embeddings });
     this.arc = new ArcReranker();
     this.count = count;
@@ -741,7 +750,7 @@ export class Marble {
 // ═══════════════════════════════════════════════════════════
 // TIER 2: Core components (direct access for advanced use)
 // ═══════════════════════════════════════════════════════════
-export { KnowledgeGraph, KG_VERSION, DEFAULT_RECONCILIATION_RULES, DEFAULT_DECAY_CONFIG } from './kg.js';
+export { KnowledgeGraph, KG_VERSION, DEFAULT_RECONCILIATION_RULES, DEFAULT_DECAY_CONFIG, DEFAULT_ENTITY_RESOLUTION } from './kg.js';
 export { Scorer } from './scorer.js';
 export { ArcReranker } from './arc.js';
 

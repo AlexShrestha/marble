@@ -712,11 +712,32 @@ export class ConversationMiner {
       return (idx != null && convEpisodeIds[idx]) || null;
     };
 
+    // Entity resolution runs when the KG has it enabled. We resolve on the
+    // node's VALUE (the claim / description / context) so that "BSB" and
+    // "British School Barcelona" — which may show up as different LLM
+    // extractions under the same slot — collapse into one canonical entity
+    // with two aliases, and the add methods treat them as the same fact.
+    const resolveEntitiesEnabled = kg.entityResolution?.enabled === true
+      && typeof kg.resolveEntity === 'function';
+    const entityIdForNode = async (node) => {
+      if (!resolveEntitiesEnabled) return undefined;
+      const label = String(node.value || '').trim();
+      if (!label) return undefined;
+      try {
+        const { id } = await kg.resolveEntity(label);
+        return id;
+      } catch { return undefined; }
+    };
+    stats.entities_resolved = 0;
+
     for (const node of [...nodes, ...inferenceNodes]) {
       try {
+        const entityId = await entityIdForNode(node);
+        if (entityId) stats.entities_resolved++;
         const addOpts = {
           validFrom: node.source_date || undefined,
           episodeId: resolveEpisodeId(node),
+          ...(entityId ? { entityId } : {}),
         };
 
         if (node.type === 'belief' || node.type === 'decision') {

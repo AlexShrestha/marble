@@ -104,11 +104,55 @@ Rules:
 
 // ─── FORMAT PARSERS ───────────────────────────────────────────────────────────
 
+/**
+ * Best-effort extraction of a conversation's real-world creation time.
+ * ChatGPT exports carry `create_time` as unix seconds; Claude exports carry
+ * `created_at` as ISO. Fall back to the latest per-message timestamp, then to
+ * null — callers must treat null as "unknown" rather than silently stamping
+ * the current wall-clock time.
+ *
+ * @param {Object} conv - Raw conversation object from the export
+ * @returns {string|null} ISO-8601 timestamp or null
+ */
+function extractConversationDate(conv) {
+  if (!conv || typeof conv !== 'object') return null;
+  if (typeof conv.create_time === 'number' && Number.isFinite(conv.create_time)) {
+    return new Date(conv.create_time * 1000).toISOString();
+  }
+  if (typeof conv.created_at === 'string' && conv.created_at) {
+    const d = new Date(conv.created_at);
+    if (!Number.isNaN(d.getTime())) return d.toISOString();
+  }
+  if (typeof conv.update_time === 'number' && Number.isFinite(conv.update_time)) {
+    return new Date(conv.update_time * 1000).toISOString();
+  }
+  // Walk messages looking for a per-message timestamp (ChatGPT mapping nodes
+  // often carry `create_time`). This catches exports where the conversation
+  // header is missing a top-level time.
+  if (conv.mapping) {
+    for (const node of Object.values(conv.mapping)) {
+      const t = node?.message?.create_time;
+      if (typeof t === 'number' && Number.isFinite(t)) {
+        return new Date(t * 1000).toISOString();
+      }
+    }
+  }
+  if (Array.isArray(conv.chat_messages)) {
+    for (const m of conv.chat_messages) {
+      if (m?.created_at) {
+        const d = new Date(m.created_at);
+        if (!Number.isNaN(d.getTime())) return d.toISOString();
+      }
+    }
+  }
+  return null;
+}
+
 function parseChatGPTFormat(data) {
   const conversations = data.conversations || (Array.isArray(data) ? data : [data]);
-  const chunks = [];
+  const result = [];
 
-  for (const conv of conversations) {
+  for (const [idx, conv] of conversations.entries()) {
     const messages = [];
 
     if (conv.mapping) {
@@ -146,19 +190,37 @@ function parseChatGPTFormat(data) {
     }
 
     if (messages.length > 0) {
-      chunks.push(messages);
+      result.push({
+        messages,
+        source_date: extractConversationDate(conv),
+        title: conv.title || conv.name || `conversation_${idx}`,
+        id: conv.id || conv.uuid || null,
+      });
     }
   }
 
-  return chunks;
+  return result;
 }
 
+/**
+ * Returns an array of `{ messages, source_date, title, id }` objects. Every
+ * supported export format is normalised to this shape so downstream code can
+ * carry source timestamps without branching per-format. `source_date` may be
+ * null — the caller must handle that rather than silently substituting now.
+ *
+ * @param {any} data - Raw parsed JSON from an export file
+ * @returns {Array<{ messages: Array, source_date: string|null, title: string, id: string|null }>}
+ */
 function parseExport(data) {
-  if (Array.isArray(data) && data[0]?.role) return [data];
+  if (Array.isArray(data) && data[0]?.role) {
+    return [{ messages: data, source_date: null, title: 'conversation_0', id: null }];
+  }
   if (data.conversations || (Array.isArray(data) && data[0]?.mapping)) return parseChatGPTFormat(data);
   if (data.chat_messages) return parseChatGPTFormat({ conversations: [data] });
   if (data.mapping) return parseChatGPTFormat({ conversations: [data] });
-  if (Array.isArray(data.messages)) return [data.messages];
+  if (Array.isArray(data.messages)) {
+    return [{ messages: data.messages, source_date: null, title: 'conversation_0', id: null }];
+  }
   return [];
 }
 
@@ -290,29 +352,40 @@ export class ConversationMiner {
   }
 
   /**
-   * Ingest a chat export file and return KG nodes extracted from it.
-   * No cap by default — processes ALL conversations.
-   * Deduplicates across chunks automatically.
+   * Parse an export file into the normalised conversation list used
+   * internally. Callers that want to build episodes before extraction (like
+   * `ingestIntoKG`) use this directly so they don't re-read the file.
+   *
+   * @param {string} chatExportPath
+   * @returns {Promise<Array<{ messages, source_date, title, id }>>}
    */
-  async ingest(chatExportPath) {
+  async parseFile(chatExportPath) {
     const raw = await readFile(chatExportPath, 'utf-8');
     const data = JSON.parse(raw);
     const conversations = parseExport(data);
-
     if (conversations.length === 0) {
       throw new Error(`[ConversationMiner] No parseable conversations found in ${chatExportPath}`);
     }
+    return conversations;
+  }
 
+  /**
+   * Chunk-mode extraction over already-parsed conversations.
+   * Nodes carry `source_date` and `source_conversation_index` back-pointers.
+   * @private
+   */
+  async _extractFromConversations(conversations) {
     const allNodes = [];
     let chunksProcessed = 0;
+    let capHit = false;
 
-    for (const messages of conversations) {
-      if (chunksProcessed >= this.maxChunks) break;
+    for (const [convIdx, conv] of conversations.entries()) {
+      if (chunksProcessed >= this.maxChunks) { capHit = true; break; }
 
-      const chunks = buildChunks(messages, this.chunkSize);
+      const chunks = buildChunks(conv.messages, this.chunkSize);
 
       for (const chunk of chunks) {
-        if (chunksProcessed >= this.maxChunks) break;
+        if (chunksProcessed >= this.maxChunks) { capHit = true; break; }
         if (chunk.length === 0) continue;
 
         const prompt = EXTRACTION_PROMPT + formatChunk(chunk);
@@ -328,7 +401,11 @@ export class ConversationMiner {
         const rawNodes = parseNodes(responseText);
         for (const raw of rawNodes) {
           const node = normalizeNode(raw);
-          if (node) allNodes.push(node);
+          if (node) {
+            node.source_date = conv.source_date;
+            node.source_conversation_index = convIdx;
+            allNodes.push(node);
+          }
         }
 
         chunksProcessed++;
@@ -338,32 +415,36 @@ export class ConversationMiner {
       }
     }
 
-    // Dedup across all chunks
+    if (capHit) {
+      console.warn(
+        `[ConversationMiner] maxChunks cap of ${this.maxChunks} reached — ` +
+        'remaining conversations were NOT processed. ' +
+        'Raise or remove `maxChunks` to process the entire file.'
+      );
+    }
+
+    // Dedup across all chunks. Dedup preserves the first-seen `source_date`
+    // and `source_conversation_index` — keeping them lets the downstream
+    // episode wiring work on the merged fact.
     return dedup(allNodes);
   }
 
   /**
-   * Ingest using exchange-mode (user+assistant pairs).
-   * No cap by default. Deduplicates automatically.
+   * Exchange-mode extraction over already-parsed conversations.
+   * @private
    */
-  async ingestExchanges(chatExportPath) {
-    const raw = await readFile(chatExportPath, 'utf-8');
-    const data = JSON.parse(raw);
-    const conversations = parseExport(data);
-
-    if (conversations.length === 0) {
-      throw new Error(`[ConversationMiner] No parseable conversations found in ${chatExportPath}`);
-    }
-
+  async _extractExchangesFromConversations(conversations) {
     const allNodes = [];
     let exchangesProcessed = 0;
     const maxExchanges = this.maxChunks === Infinity ? Infinity : this.maxChunks * this.chunkSize;
+    let capHit = false;
 
-    for (const messages of conversations) {
-      const exchanges = buildExchangePairs(messages);
+    for (const [convIdx, conv] of conversations.entries()) {
+      if (exchangesProcessed >= maxExchanges) { capHit = true; break; }
+      const exchanges = buildExchangePairs(conv.messages);
 
       for (const exchange of exchanges) {
-        if (exchangesProcessed >= maxExchanges) break;
+        if (exchangesProcessed >= maxExchanges) { capHit = true; break; }
 
         const text = `[USER]: ${exchange.user}\n\n[ASSISTANT]: ${exchange.assistant}`;
         const prompt = EXCHANGE_EXTRACTION_PROMPT + text;
@@ -379,7 +460,11 @@ export class ConversationMiner {
         const rawNodes = parseNodes(responseText);
         for (const raw of rawNodes) {
           const node = normalizeNode(raw);
-          if (node) allNodes.push(node);
+          if (node) {
+            node.source_date = conv.source_date;
+            node.source_conversation_index = convIdx;
+            allNodes.push(node);
+          }
         }
 
         exchangesProcessed++;
@@ -389,7 +474,37 @@ export class ConversationMiner {
       }
     }
 
+    if (capHit) {
+      console.warn(
+        `[ConversationMiner] maxExchanges cap reached — remaining exchanges were NOT processed. ` +
+        'Raise or remove `maxChunks` to process the entire file.'
+      );
+    }
+
     return dedup(allNodes);
+  }
+
+  /**
+   * Ingest a chat export file and return KG nodes extracted from it.
+   *
+   * Nodes carry the source conversation's real-world timestamp (`source_date`)
+   * and a back-pointer (`source_conversation_index`) that `ingestIntoKG()`
+   * uses to pair each node with an episode record. No wall-clock substitution
+   * happens here — when a conversation has no extractable date, nodes get a
+   * null `source_date` and the caller decides how to handle that.
+   */
+  async ingest(chatExportPath) {
+    const conversations = await this.parseFile(chatExportPath);
+    return this._extractFromConversations(conversations);
+  }
+
+  /**
+   * Ingest using exchange-mode (user+assistant pairs).
+   * Same source-timestamp handling as `ingest()`.
+   */
+  async ingestExchanges(chatExportPath) {
+    const conversations = await this.parseFile(chatExportPath);
+    return this._extractExchangesFromConversations(conversations);
   }
 
   /**
@@ -440,45 +555,187 @@ export class ConversationMiner {
   }
 
   /**
-   * Full pipeline: extract → dedup → infer → merge → write to KG.
+   * Full pipeline: extract → dedup → infer → episodes → write to KG.
+   *
+   * Before extraction runs, one episode is created per source conversation
+   * (via `kg.addEpisode()`). Every extracted fact is written to the KG with
+   * `validFrom = source_date` and `episodeId` pointing to the conversation it
+   * came from — so provenance survives through dedup and facts age from the
+   * date the user actually said the thing, not the date the miner ran.
+   *
+   * Inference facts inherit provenance from their source facts (all referenced
+   * source_conversation_indexes merge into the inference's evidence array).
    *
    * @param {string} chatExportPath
    * @param {Object} kg - KnowledgeGraph instance
    * @param {Object} [opts]
    * @param {boolean} [opts.exchangeMode=true]
    * @param {boolean} [opts.runInference=true]
+   * @param {string} [opts.sourceLabel] - Episode `source` field. Defaults to
+   *   'chat-export' — override when ingesting a specific provider so
+   *   downstream provenance queries can filter by source.
    * @returns {Promise<Object>} stats
    */
   async ingestIntoKG(chatExportPath, kg, opts = {}) {
-    const useExchanges = opts.exchangeMode !== false;
-    const runInference = opts.runInference !== false;
+    const sourceLabel = opts.sourceLabel || 'chat-export';
+    const conversations = await this.parseFile(chatExportPath);
+    return this._runPipeline(conversations, kg, {
+      exchangeMode: opts.exchangeMode !== false,
+      runInference: opts.runInference !== false,
+      episodeMeta: (idx, conv) => ({
+        source: sourceLabel,
+        source_date: conv.source_date,
+        content_summary: conv.title,
+        metadata: {
+          file: chatExportPath,
+          conversation_index: idx,
+          message_count: (conv.messages || []).length,
+          ...(conv.id ? { conversation_id: conv.id } : {}),
+        },
+      }),
+    });
+  }
 
-    // Phase 1: Extract
-    const nodes = useExchanges
-      ? await this.ingestExchanges(chatExportPath)
-      : await this.ingest(chatExportPath);
+  /**
+   * Ingest generic `Episode` objects — the format-agnostic entry point.
+   *
+   * An episode is `{ id?, source, source_date, content, metadata? }`. This is
+   * the contract consumers reach for when their source isn't a ChatGPT/Claude
+   * export: journals, emails, meeting notes, Slack, anything textual.
+   * Extraction, dedup, inference, and provenance wiring are identical to
+   * `ingestIntoKG()` — the only difference is that the "conversation" is a
+   * single user-role message with the episode's raw text.
+   *
+   * @param {Array<{id?: string, source?: string, source_date?: string, content: string, metadata?: object}>} episodes
+   * @param {Object} kg - KnowledgeGraph instance
+   * @param {Object} [opts]
+   * @param {boolean} [opts.runInference=true]
+   * @returns {Promise<Object>} Same stats shape as `ingestIntoKG()`
+   */
+  async ingestEpisodesIntoKG(episodes, kg, opts = {}) {
+    if (!Array.isArray(episodes) || episodes.length === 0) {
+      throw new Error('[ConversationMiner] ingestEpisodesIntoKG requires a non-empty episodes array');
+    }
 
-    // Phase 2: Inference pass
+    const conversations = episodes.map((ep, idx) => ({
+      // Each episode becomes a single-message conversation so the extraction
+      // prompt sees user text to mine. The assistant side is empty — exchange
+      // mode degrades to chunk mode automatically.
+      messages: [{ role: 'user', content: String(ep.content || '') }],
+      source_date: ep.source_date || null,
+      title: ep.id || `episode_${idx}`,
+      id: ep.id || null,
+      _original: ep,
+    }));
+
+    return this._runPipeline(conversations, kg, {
+      // Exchange mode requires an assistant turn; force chunk mode for
+      // episodes so the extraction prompt receives the single user message.
+      exchangeMode: false,
+      runInference: opts.runInference !== false,
+      episodeMeta: (idx, conv) => ({
+        id: conv._original.id,
+        source: conv._original.source || 'generic',
+        source_date: conv._original.source_date || null,
+        content: conv._original.content || '',
+        content_summary: conv._original.content_summary,
+        metadata: conv._original.metadata,
+      }),
+    });
+  }
+
+  /**
+   * Shared pipeline used by `ingestIntoKG` and `ingestEpisodesIntoKG`:
+   * create episodes, extract, infer, write back with provenance.
+   * @private
+   */
+  async _runPipeline(conversations, kg, opts) {
+    const { exchangeMode, runInference, episodeMeta } = opts;
+
+    // Phase 0: one episode per conversation. Skip if the KG predates the
+    // episode schema — keeps legacy in-memory KG mocks working.
+    const supportsEpisodes = typeof kg.addEpisode === 'function';
+    const convEpisodeIds = new Array(conversations.length).fill(null);
+    if (supportsEpisodes) {
+      for (const [idx, conv] of conversations.entries()) {
+        const meta = episodeMeta(idx, conv);
+        const messages = conv.messages || [];
+        const previewFallback = messages.slice(0, 3)
+          .map(m => `[${m.role}] ${String(m.content || '').slice(0, 200)}`)
+          .join('\n') + (messages.length > 3 ? `\n… +${messages.length - 3} more messages` : '');
+        const ep = kg.addEpisode({
+          id: meta.id,
+          source: meta.source,
+          source_date: meta.source_date,
+          content: meta.content ?? previewFallback,
+          content_summary: meta.content_summary,
+          metadata: meta.metadata,
+        });
+        convEpisodeIds[idx] = ep.id;
+      }
+    }
+
+    // Phase 1: extract
+    const nodes = exchangeMode
+      ? await this._extractExchangesFromConversations(conversations)
+      : await this._extractFromConversations(conversations);
+
+    // Phase 2: inference
     let inferenceNodes = [];
     if (runInference && nodes.length >= 3) {
       inferenceNodes = await this.inferFromNodes(nodes);
+      const allEpisodeIds = [...new Set(
+        nodes.map(n => convEpisodeIds[n.source_conversation_index]).filter(Boolean)
+      )];
+      const latest = nodes.map(n => n.source_date).filter(Boolean).sort().pop();
+      for (const inf of inferenceNodes) {
+        inf._episode_ids = allEpisodeIds;
+        inf.source_date = latest || null;
+      }
     }
 
-    const allNodes = [...nodes, ...inferenceNodes];
+    // Phase 3: write back with provenance
+    const stats = {
+      ingested: 0,
+      beliefs: 0,
+      preferences: 0,
+      identities: 0,
+      emotions: 0,
+      inferences: inferenceNodes.length,
+      duplicates_merged: nodes.reduce((s, n) => s + ((n.evidence_count || 1) - 1), 0),
+      episodes: supportsEpisodes ? convEpisodeIds.filter(Boolean).length : 0,
+    };
 
-    // Phase 3: Write to KG
-    const stats = { ingested: 0, beliefs: 0, preferences: 0, identities: 0, emotions: 0, inferences: inferenceNodes.length, duplicates_merged: nodes.reduce((s, n) => s + ((n.evidence_count || 1) - 1), 0) };
+    const resolveEpisodeId = (node) => {
+      if (node._episode_ids?.length) return node._episode_ids[0];
+      const idx = node.source_conversation_index;
+      return (idx != null && convEpisodeIds[idx]) || null;
+    };
 
-    for (const node of allNodes) {
+    for (const node of [...nodes, ...inferenceNodes]) {
       try {
+        const addOpts = {
+          validFrom: node.source_date || undefined,
+          episodeId: resolveEpisodeId(node),
+        };
+
         if (node.type === 'belief' || node.type === 'decision') {
-          kg.addBelief(node.topic, node.value, node.confidence);
+          kg.addBelief(node.topic, node.value, node.confidence, addOpts);
+          if (node._episode_ids?.length > 1) {
+            this.#linkAdditionalEpisodes(kg, 'belief', node.topic, node._episode_ids);
+          }
           stats.beliefs++;
         } else if (node.type === 'preference') {
-          kg.addPreference(node.topic, node.value, node.confidence);
+          kg.addPreference(node.topic, node.value, node.confidence, addOpts);
+          if (node._episode_ids?.length > 1) {
+            this.#linkAdditionalEpisodes(kg, 'preference', node.topic, node._episode_ids);
+          }
           stats.preferences++;
         } else if (node.type === 'identity') {
-          kg.addIdentity(node.topic, node.value, node.confidence);
+          kg.addIdentity(node.topic, node.value, node.confidence, addOpts);
+          if (node._episode_ids?.length > 1) {
+            this.#linkAdditionalEpisodes(kg, 'identity', node.topic, node._episode_ids);
+          }
           stats.identities++;
         }
 
@@ -497,6 +754,31 @@ export class ConversationMiner {
     }
 
     return stats;
+  }
+
+  /**
+   * Append extra episode ids to the most recent active fact of (type, topic).
+   * Used for inference nodes that trace to multiple source episodes — the
+   * first id is linked via `addBelief/Preference/Identity({ episodeId })`,
+   * the rest are appended here.
+   * @private
+   */
+  #linkAdditionalEpisodes(kg, type, topic, episodeIds) {
+    const collection = type === 'belief' ? kg.user?.beliefs
+      : type === 'preference' ? kg.user?.preferences
+      : type === 'identity' ? kg.user?.identities
+      : null;
+    if (!collection) return;
+    const key = (topic || '').toLowerCase();
+    const fact = collection
+      .filter(f => !f.valid_to)
+      .reverse()
+      .find(f => (f.topic || f.type || f.role || '').toLowerCase() === key);
+    if (!fact) return;
+    if (!Array.isArray(fact.evidence)) fact.evidence = [];
+    for (const id of episodeIds) {
+      if (!fact.evidence.includes(id)) fact.evidence.push(id);
+    }
   }
 
   /**

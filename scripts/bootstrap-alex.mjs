@@ -1,12 +1,20 @@
 #!/usr/bin/env node
 /**
- * bootstrap-alex.mjs — Seed Marble KG for Alex
+ * bootstrap-alex.mjs — Seed Marble KG for Alex via the public `Marble` API.
+ *
+ * Previous versions of this script went straight to `ConversationMiner` and
+ * `InvestigativeCommittee`, skipping `Marble.learn()` and the L1.5/L2/L3
+ * pipeline entirely. This rewrite drives everything through the lifecycle
+ * documented at the top of `core/index.js`:
+ *
+ *   init → ingestConversations / ingestEpisodes → learn → investigate → save
  *
  * Pipeline:
- *   Phase 1: ConversationMiner on all chat exports → thousands of raw nodes
- *   Phase 2: Inference pass on clusters → psychological patterns
- *   Phase 3: InvestigativeCommittee fills gaps with recursive follow-ups
- *   Phase 4: Cross-reference all beliefs → contradictions, clusters
+ *   Phase 0: Seed Alex's profile (interests, initial beliefs/prefs/identities)
+ *   Phase 1: Ingest ChatGPT exports via `marble.ingestConversations()`
+ *   Phase 2: Ingest Claude memory + GitHub READMEs as generic episodes
+ *   Phase 3: `marble.learn()` — L1.5 swarm, L2 inference, L3 clone evolution
+ *   Phase 4: `marble.investigate()` — adaptive committee fills gaps
  *
  * Usage:
  *   node scripts/bootstrap-alex.mjs
@@ -17,13 +25,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-// glob requires Node 22+; use readdirSync fallback for Node 20
-const glob = async (pattern) => {
-  const dir = path.dirname(pattern.replace(/\*.*/, ''));
-  if (!fs.existsSync(dir)) return [];
-  const ext = pattern.match(/\*(\.\w+)$/)?.[1] || '';
-  return fs.readdirSync(dir).filter(f => !ext || f.endsWith(ext)).map(f => path.join(dir, f));
-};
+import { Marble } from '../core/index.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -61,7 +63,6 @@ async function llmCall(prompt) {
       }
 
       const j = await res.json();
-      // Ollama format: data.message.content
       const content = j.message?.content || j.choices?.[0]?.message?.content || '';
       if (!content) throw new Error('Empty LLM response');
       return content;
@@ -78,32 +79,61 @@ async function llmCall(prompt) {
   }
 }
 
-// ── Data sources ─────────────────────────────────────────────────────────
+// ── Data gathering ─────────────────────────────────────────────────────
 
-// Claude memory files (all projects)
-function findClaudeMemory() {
+/**
+ * Walk `~/.claude/projects/*/memory/*.md` and return episode-shaped objects
+ * ready for `marble.ingestEpisodes()`. One episode per memory file; source
+ * date reads the file's mtime rather than substituting "now".
+ */
+function gatherClaudeMemory() {
   const baseDir = path.join(HOME, '.claude', 'projects');
   const results = [];
   if (!fs.existsSync(baseDir)) return results;
-  try {
-    const projects = fs.readdirSync(baseDir);
-    for (const proj of projects) {
-      const memDir = path.join(baseDir, proj, 'memory');
-      if (fs.existsSync(memDir)) {
-        const files = fs.readdirSync(memDir).filter(f => f.endsWith('.md'));
-        for (const file of files) {
-          try {
-            results.push({ file: `claude:${proj}/${file}`, content: fs.readFileSync(path.join(memDir, file), 'utf8') });
-          } catch { /* skip */ }
-        }
-      }
+  for (const proj of fs.readdirSync(baseDir)) {
+    const memDir = path.join(baseDir, proj, 'memory');
+    if (!fs.existsSync(memDir)) continue;
+    for (const file of fs.readdirSync(memDir).filter(f => f.endsWith('.md'))) {
+      const full = path.join(memDir, file);
+      try {
+        const content = fs.readFileSync(full, 'utf8');
+        const stat = fs.statSync(full);
+        results.push({
+          id: `claude:${proj}/${file}`,
+          source: 'claude-memory',
+          source_date: stat.mtime.toISOString(),
+          content,
+          metadata: { project: proj, file },
+        });
+      } catch { /* skip unreadable files */ }
     }
-  } catch { /* skip */ }
+  }
   return results;
 }
 
-// ChatGPT exports
-function findChatGPTExports() {
+function gatherGitHubReadmes() {
+  const ghDir = path.join(HOME, 'Documents', 'GitHub');
+  const results = [];
+  if (!fs.existsSync(ghDir)) return results;
+  for (const repo of fs.readdirSync(ghDir)) {
+    const readme = path.join(ghDir, repo, 'README.md');
+    if (!fs.existsSync(readme)) continue;
+    try {
+      const content = fs.readFileSync(readme, 'utf8');
+      const stat = fs.statSync(readme);
+      results.push({
+        id: `github:${repo}/README.md`,
+        source: 'github-readme',
+        source_date: stat.mtime.toISOString(),
+        content,
+        metadata: { repo },
+      });
+    } catch { /* skip */ }
+  }
+  return results;
+}
+
+function gatherChatGPTExports() {
   const dlDir = path.join(HOME, 'Downloads');
   if (!fs.existsSync(dlDir)) return [];
   return fs.readdirSync(dlDir)
@@ -111,64 +141,33 @@ function findChatGPTExports() {
     .map(f => path.join(dlDir, f));
 }
 
-// GitHub READMEs
-function findGitHubReadmes() {
-  const ghDir = path.join(HOME, 'Documents', 'GitHub');
-  const results = [];
-  if (!fs.existsSync(ghDir)) return results;
-  try {
-    const repos = fs.readdirSync(ghDir);
-    for (const repo of repos) {
-      const readme = path.join(ghDir, repo, 'README.md');
-      if (fs.existsSync(readme)) {
-        try {
-          results.push({ file: `github:${repo}/README.md`, content: fs.readFileSync(readme, 'utf8') });
-        } catch { /* skip */ }
-      }
-    }
-  } catch { /* skip */ }
-  return results;
-}
-
-function readDirText(dir, maxFiles = 50) {
-  const results = [];
-  if (!fs.existsSync(dir)) return results;
-  const files = fs.readdirSync(dir).filter(f => f.endsWith('.md') || f.endsWith('.txt')).slice(0, maxFiles);
-  for (const file of files) {
-    try {
-      results.push({ file, content: fs.readFileSync(path.join(dir, file), 'utf8') });
-    } catch { /* skip */ }
-  }
-  return results;
-}
-
+/**
+ * Build a registerSource()-compatible search function over a list of raw
+ * documents. Used to give the InvestigativeCommittee evidence to query.
+ */
 function buildSearchFn(documents) {
   return async (query) => {
     const q = query.toLowerCase();
     const hits = [];
-    for (const { file, content } of documents) {
+    for (const { content, id } of documents) {
       const words = q.split(/\s+/).filter(w => w.length > 3);
       const matches = words.filter(w => content.toLowerCase().includes(w));
-      if (matches.length > 0) {
-        // For strong matches (3+ keywords), return full content (capped at 2000 chars)
-        if (matches.length >= 3) {
-          hits.push(`[${file}] ${content.slice(0, 2000)}`);
-        } else {
-          const lines = content.split('\n');
-          const relevant = lines.filter(l => matches.some(w => l.toLowerCase().includes(w)));
-          hits.push(`[${file}] ${relevant.slice(0, 8).join(' | ')}`);
-        }
+      if (matches.length === 0) continue;
+      if (matches.length >= 3) {
+        hits.push(`[${id}] ${content.slice(0, 2000)}`);
+      } else {
+        const lines = content.split('\n');
+        const relevant = lines.filter(l => matches.some(w => l.toLowerCase().includes(w)));
+        hits.push(`[${id}] ${relevant.slice(0, 8).join(' | ')}`);
       }
     }
     return hits.slice(0, 12);
   };
 }
 
-// ── Seed facts ────────────────────────────────────────────────────────────
+// ── Alex seed ─────────────────────────────────────────────────────────
 
 const ALEX_SEED = {
-  id: 'alex',
-  dob: '1988-11-02',
   interests: [
     { topic: 'LLMs / Generative AI', weight: 0.92, trend: 'rising' },
     { topic: 'AI Agents & Orchestration', weight: 0.91, trend: 'rising' },
@@ -182,243 +181,164 @@ const ALEX_SEED = {
     { topic: 'Fitness & Biohacking', weight: 0.65, trend: 'rising' },
     { topic: 'Logistics & Trade', weight: 0.55, trend: 'stable' },
     { topic: 'Crypto / Web3', weight: 0.45, trend: 'stable' },
-  ].map(i => ({ ...i, last_boost: new Date().toISOString() })),
+  ],
   context: {
-    calendar: [],
     active_projects: ['AhaRoll', 'SuperstateX', 'BooRadar', 'Vivo', 'Marble'],
-    recent_conversations: [],
-    mood_signal: null,
     location: 'Barcelona',
   },
-  history: [],
-  source_trust: {},
   beliefs: [
-    { topic: 'building', claim: 'Ship fast, learn from real users — not from planning', strength: 0.9, evidence_count: 1, valid_from: new Date().toISOString(), valid_to: null, recorded_at: new Date().toISOString() },
-    { topic: 'AI', claim: 'AI agents will replace most solo founder execution within 2 years', strength: 0.85, evidence_count: 1, valid_from: new Date().toISOString(), valid_to: null, recorded_at: new Date().toISOString() },
+    { topic: 'building', claim: 'Ship fast, learn from real users — not from planning', strength: 0.9 },
+    { topic: 'AI', claim: 'AI agents will replace most solo founder execution within 2 years', strength: 0.85 },
   ],
   preferences: [
-    { type: 'work_style', description: 'Prefers systems thinking + delegation over manual execution', strength: 0.85, valid_from: new Date().toISOString(), valid_to: null, recorded_at: new Date().toISOString() },
-    { type: 'content', description: 'Direct, no-fluff communication — skips pleasantries', strength: 0.9, valid_from: new Date().toISOString(), valid_to: null, recorded_at: new Date().toISOString() },
+    { type: 'work_style', description: 'Prefers systems thinking + delegation over manual execution', strength: 0.85 },
+    { type: 'content', description: 'Direct, no-fluff communication — skips pleasantries', strength: 0.9 },
   ],
   identities: [
-    { role: 'multi-venture founder', context: 'Barcelona, 5-month runway', salience: 1.0, valid_from: new Date().toISOString(), valid_to: null, recorded_at: new Date().toISOString() },
-    { role: 'builder', context: 'AI tools, consumer apps', salience: 0.9, valid_from: new Date().toISOString(), valid_to: null, recorded_at: new Date().toISOString() },
+    { role: 'multi-venture founder', context: 'Barcelona, 5-month runway', salience: 1.0 },
+    { role: 'builder', context: 'AI tools, consumer apps', salience: 0.9 },
   ],
   confidence: { AI: 0.9, marketing: 0.75, logistics: 0.6, coaching: 0.65 },
-  clones: [],
 };
+
+/**
+ * Apply the seed to a freshly-initialised KG. Skips if the KG already has
+ * beliefs — that way re-running bootstrap over an existing file only adds
+ * new episodes and doesn't replay the seed.
+ */
+function applySeed(marble) {
+  const kg = marble.kg;
+  if ((kg.user.beliefs || []).length > 0) return false;
+
+  kg.user.id = 'alex';
+  kg.user.context = { ...(kg.user.context || {}), ...ALEX_SEED.context };
+  kg.user.confidence = { ...(kg.user.confidence || {}), ...ALEX_SEED.confidence };
+
+  const now = new Date().toISOString();
+  kg.user.interests = ALEX_SEED.interests.map(i => ({ ...i, last_boost: now }));
+
+  for (const b of ALEX_SEED.beliefs) {
+    kg.addBelief(b.topic, b.claim, b.strength);
+  }
+  for (const p of ALEX_SEED.preferences) {
+    kg.addPreference(p.type, p.description, p.strength);
+  }
+  for (const id of ALEX_SEED.identities) {
+    kg.addIdentity(id.role, id.context, id.salience);
+  }
+  return true;
+}
 
 // ── Main ──────────────────────────────────────────────────────────────────
 
 async function main() {
   console.log('=== Marble Bootstrap: Alex ===\n');
 
-  // ── Phase 0: Gather data sources ──────────────────────
-  const claudeMemory = findClaudeMemory();
-  const chatGPTExports = findChatGPTExports();
-  const githubReadmes = findGitHubReadmes();
+  const marble = new Marble({ storage: KG_PATH, llm: llmCall, silent: true });
+  await marble.init();
 
-  console.log(`Data sources found:`);
+  const seeded = applySeed(marble);
+  console.log(seeded ? '✓ Seeded fresh KG with Alex\'s profile' : '→ Reusing existing KG (skipping seed)');
+
+  // ── Phase 0: Data gathering ──────────────────────────────
+  const claudeMemory = gatherClaudeMemory();
+  const chatGPTExports = gatherChatGPTExports();
+  const githubReadmes = gatherGitHubReadmes();
+
+  console.log('\nData sources found:');
   console.log(`  Claude memory files: ${claudeMemory.length}`);
   console.log(`  ChatGPT export files: ${chatGPTExports.length}`);
   console.log(`  GitHub READMEs: ${githubReadmes.length}`);
 
-  const allDocs = [...claudeMemory, ...githubReadmes];
-  const searchFn = buildSearchFn(allDocs);
-
-  // Initialise KG with seed
-  const kgData = {
-    user: ALEX_SEED,
-    _dimensionalPreferences: [],
-    updated_at: new Date().toISOString(),
-  };
-
-  // KG proxy that maps to real field names
-  const kgProxy = {
-    user: kgData.user,
-    getActiveBeliefs: () => kgData.user.beliefs.filter(b => !b.valid_to),
-    getActivePreferences: () => kgData.user.preferences.filter(p => !p.valid_to),
-    getActiveIdentities: () => kgData.user.identities.filter(i => !i.valid_to),
-    getDimensionalPreferences: () => kgData._dimensionalPreferences || [],
-    getInterestWeight: (topic) => {
-      const i = kgData.user.interests.find(x => x.topic.toLowerCase() === topic.toLowerCase());
-      return i ? i.weight : 0;
-    },
-    addBelief: (topic, claim, strength = 0.75) => {
-      const now = new Date().toISOString();
-      kgData.user.beliefs.push({ topic, claim, strength, evidence_count: 1, valid_from: now, valid_to: null, recorded_at: now });
-    },
-    addPreference: (type, description, strength = 0.7) => {
-      const now = new Date().toISOString();
-      kgData.user.preferences.push({ type, description, strength, valid_from: now, valid_to: null, recorded_at: now });
-    },
-    addIdentity: (role, context = '', salience = 0.7) => {
-      const now = new Date().toISOString();
-      kgData.user.identities.push({ role, context, salience, valid_from: now, valid_to: null, recorded_at: now });
-    },
-    tagEmotions: (type, topic, emotions) => {
-      const topicLower = topic.toLowerCase();
-      let collection;
-      if (type === 'belief') collection = kgData.user.beliefs;
-      else if (type === 'preference') collection = kgData.user.preferences;
-      else if (type === 'identity') collection = kgData.user.identities;
-      else return;
-      for (const item of collection) {
-        const key = item.topic || item.type || item.role || '';
-        if (key.toLowerCase() === topicLower && !item.valid_to) {
-          item.emotions = [...new Set([...(item.emotions || []), ...emotions])];
-        }
-      }
-    },
-  };
-
-  // ── Phase 1: Mine conversations ──────────────────────────
+  // ── Phase 1: Ingest ChatGPT exports ───────────────────────
   if (chatGPTExports.length > 0) {
-    console.log('\n── Phase 1: Mining conversations ──');
-    const { ConversationMiner } = await import('../core/conversation-miner.js');
-    const miner = new ConversationMiner(llmCall, {
-      chunkSize: 20,
-      onProgress: (stats) => {
-        if (stats.phase === 'extract') {
-          console.log(`    chunk ${stats.chunksProcessed} → ${stats.nodesExtracted} nodes total`);
-        }
-        if (stats.phase === 'infer') {
-          console.log(`    inference batch ${stats.inferBatch} → ${stats.inferencesGenerated} inferences`);
-        }
-      },
-    });
-
-    let totalStats = { ingested: 0, beliefs: 0, preferences: 0, identities: 0, inferences: 0, duplicates_merged: 0 };
-
+    console.log('\n── Phase 1: Ingesting ChatGPT exports ──');
     for (const exportPath of chatGPTExports) {
       console.log(`\n  Processing: ${path.basename(exportPath)}`);
       try {
-        const stats = await miner.ingestIntoKG(exportPath, kgProxy, { exchangeMode: false, runInference: true });
-        totalStats.ingested += stats.ingested;
-        totalStats.beliefs += stats.beliefs;
-        totalStats.preferences += stats.preferences;
-        totalStats.identities += stats.identities;
-        totalStats.inferences += stats.inferences;
-        totalStats.duplicates_merged += stats.duplicates_merged;
-        console.log(`    → ${stats.ingested} nodes (${stats.beliefs}b/${stats.preferences}p/${stats.identities}i), ${stats.inferences} inferences, ${stats.duplicates_merged} dupes merged`);
+        const stats = await marble.ingestConversations(exportPath, {
+          exchangeMode: false,
+          runInference: true,
+          sourceLabel: 'chatgpt-export',
+          onProgress: (s) => {
+            if (s.phase === 'extract' && s.chunksProcessed && s.chunksProcessed % 10 === 0) {
+              console.log(`    chunk ${s.chunksProcessed} → ${s.nodesExtracted} nodes`);
+            }
+          },
+        });
+        console.log(`    → ${stats.ingested} nodes (${stats.beliefs}b/${stats.preferences}p/${stats.identities}i), ${stats.inferences} inferences, ${stats.episodes} episodes`);
+        if (stats.reconciled && (stats.reconciled.beliefs_invalidated + stats.reconciled.preferences_invalidated + stats.reconciled.identities_invalidated) > 0) {
+          console.log(`    reconciled: ${JSON.stringify(stats.reconciled)}`);
+        }
       } catch (err) {
         console.warn(`    ✗ Failed: ${err.message}`);
       }
     }
-
-    console.log(`\n  Phase 1 total: ${totalStats.ingested} nodes ingested, ${totalStats.inferences} inferences`);
-    console.log(`  KG now has: ${kgData.user.beliefs.length} beliefs, ${kgData.user.preferences.length} prefs, ${kgData.user.identities.length} identities`);
   } else {
     console.log('\n[skip] No ChatGPT exports found in ~/Downloads/');
   }
 
-  // ── Phase 2: Mine Claude memory ──────────────────────────
-  if (claudeMemory.length > 0) {
-    console.log('\n── Phase 2: Mining Claude memory files ──');
-    for (const { file, content } of claudeMemory) {
-      // Direct extraction from structured memory files (simpler than conversation mining)
-      try {
-        const prompt = `Extract knowledge graph nodes from this AI assistant memory file about a user.
-
-File: ${file}
-Content:
-${content.slice(0, 3000)}
-
-Return ONLY a JSON array:
-[{ "type": "belief"|"preference"|"identity", "value": "statement about user", "confidence": 0.7-0.9, "topic": "category" }]`;
-
-        const raw = await llmCall(prompt);
-        const nodes = parseNodesFromRaw(raw);
-        for (const node of nodes) {
-          if (node.type === 'belief' || node.type === 'decision') kgProxy.addBelief(node.topic, node.value, node.confidence);
-          else if (node.type === 'preference') kgProxy.addPreference(node.topic, node.value, node.confidence);
-          else if (node.type === 'identity') kgProxy.addIdentity(node.topic, node.value, node.confidence);
-        }
-        if (nodes.length > 0) console.log(`  ${file}: ${nodes.length} nodes`);
-      } catch (err) {
-        console.warn(`  ${file}: failed (${err.message})`);
-      }
+  // ── Phase 2: Ingest Claude memory + GitHub READMEs as generic episodes ──
+  const docEpisodes = [...claudeMemory, ...githubReadmes];
+  if (docEpisodes.length > 0) {
+    console.log(`\n── Phase 2: Ingesting ${docEpisodes.length} generic episodes ──`);
+    try {
+      const stats = await marble.ingestEpisodes(docEpisodes, { runInference: true });
+      console.log(`  → ${stats.ingested} nodes, ${stats.inferences} inferences, ${stats.episodes} episodes`);
+    } catch (err) {
+      console.warn(`  ✗ Failed: ${err.message}`);
     }
-    console.log(`  KG now has: ${kgData.user.beliefs.length} beliefs, ${kgData.user.preferences.length} prefs, ${kgData.user.identities.length} identities`);
   }
 
-  // ── Phase 3: Investigative Committee fills gaps ──────────
-  console.log('\n── Phase 3: Investigative Committee (gap-filling) ──');
+  console.log(`\n  KG state: ${marble.kg.user.beliefs.length} beliefs, ${marble.kg.user.preferences.length} prefs, ${marble.kg.user.identities.length} identities, ${marble.kg.user.episodes.length} episodes`);
 
-  const { InvestigativeCommittee } = await import('../core/investigative-committee.js');
-
-  const MAX_ROUNDS = parseInt(process.env.ROUNDS || '2');
-  const committee = new InvestigativeCommittee(kgProxy, llmCall, {
-    maxRounds: MAX_ROUNDS,
-    maxQuestionsPerRound: 4,
-    maxFollowUpsPerFinding: 2,
-    enableDebate: true,
-    enablePsychInference: true,
-    enableCrossRef: true,
-  });
-
-  // Register all document sources for evidence search
-  committee.registerSource('claude-memory', buildSearchFn(claudeMemory));
-  committee.registerSource('github-readmes', buildSearchFn(githubReadmes));
-
-  console.log(`  Running ${MAX_ROUNDS} round(s) with ${kgData.user.beliefs.length} beliefs as starting context...\n`);
+  // ── Phase 3: learn() — L1.5 swarm, L2 inference, L3 clone evolution ──
+  console.log('\n── Phase 3: marble.learn() ──');
   try {
-    const result = await committee.investigate(MAX_ROUNDS);
-    console.log(`\n  Investigation complete:`);
-    console.log(`    Questions answered: ${result.answered}`);
-    console.log(`    Knowledge gaps: ${result.gaps.length}`);
-    console.log(`    Psych inferences: ${result.psychInferences?.length || 0}`);
-    console.log(`    Committee: ${result.committee?.map(c => c.name).join(', ') || '(fallback)'}`);
-
-    if (result.crossRefResults) {
-      console.log(`    Contradictions: ${result.crossRefResults.contradictions?.length || 0}`);
-      console.log(`    Clusters: ${result.crossRefResults.clusters?.length || 0}`);
-    }
-
-    if (result.gaps.length) {
-      console.log('\n  Knowledge gaps (for clone hypotheses):');
-      result.gaps.slice(0, 10).forEach((g, i) => console.log(`    ${i + 1}. ${g}`));
+    const learnResult = await marble.learn();
+    console.log(`  insights: ${learnResult.insights}, candidates: ${learnResult.candidates}, clones: ${learnResult.clones}`);
+    console.log(`  stages: ${JSON.stringify(learnResult.stages)}`);
+    if (learnResult.failures.length > 0) {
+      console.warn(`  failures: ${learnResult.failures.map(f => `${f.stage}:${f.message}`).join(' | ')}`);
     }
   } catch (err) {
-    console.error('  Investigation error:', err.message);
-    console.log('  Continuing with mined data...');
+    console.warn(`  learn() failed: ${err.message}`);
+  }
+
+  // ── Phase 4: investigate() — committee fills gaps ───────
+  console.log('\n── Phase 4: marble.investigate() ──');
+  const MAX_ROUNDS = parseInt(process.env.ROUNDS || '2');
+  try {
+    const result = await marble.investigate({
+      maxRounds: MAX_ROUNDS,
+      sources: {
+        'claude-memory': buildSearchFn(claudeMemory),
+        'github-readmes': buildSearchFn(githubReadmes),
+      },
+    });
+    console.log(`  answered: ${result.answered || 0}, gaps: ${result.gaps?.length || 0}, psychInferences: ${result.psychInferences?.length || 0}`);
+    if (result.gaps?.length) {
+      console.log('  Top gaps:');
+      result.gaps.slice(0, 5).forEach((g, i) => console.log(`    ${i + 1}. ${g}`));
+    }
+  } catch (err) {
+    console.warn(`  investigate() failed: ${err.message}`);
   }
 
   // ── Save ────────────────────────────────────────────────
   if (DRY_RUN) {
     console.log('\n[dry-run] KG not saved.');
-    console.log(`  Would save: ${kgData.user.beliefs.length} beliefs, ${kgData.user.preferences.length} prefs, ${kgData.user.identities.length} identities`);
     return;
   }
 
-  fs.mkdirSync(path.join(ROOT, 'data', 'kg'), { recursive: true });
-  fs.writeFileSync(KG_PATH, JSON.stringify(kgData, null, 2));
+  fs.mkdirSync(path.dirname(KG_PATH), { recursive: true });
+  await marble.save();
   console.log(`\n✓ KG saved to ${KG_PATH}`);
-  console.log(`  Beliefs: ${kgData.user.beliefs.length}`);
-  console.log(`  Preferences: ${kgData.user.preferences.length}`);
-  console.log(`  Identities: ${kgData.user.identities.length}`);
-  console.log(`  Clones: ${kgData.user.clones.length}`);
-}
-
-// Helper for raw LLM response parsing (used in Phase 2)
-function parseNodesFromRaw(responseText) {
-  let text = responseText.trim();
-  text = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '');
-  const start = text.indexOf('[');
-  const end = text.lastIndexOf(']');
-  if (start === -1 || end === -1) return [];
-  try {
-    const nodes = JSON.parse(text.slice(start, end + 1));
-    if (!Array.isArray(nodes)) return [];
-    return nodes.filter(n => n && n.type && n.value).map(n => ({
-      type: String(n.type).toLowerCase(),
-      value: String(n.value).trim(),
-      confidence: Math.max(0, Math.min(1, parseFloat(n.confidence) || 0.6)),
-      topic: String(n.topic || n.type).trim(),
-    }));
-  } catch {
-    return [];
-  }
+  console.log(`  Beliefs: ${marble.kg.user.beliefs.length}`);
+  console.log(`  Preferences: ${marble.kg.user.preferences.length}`);
+  console.log(`  Identities: ${marble.kg.user.identities.length}`);
+  console.log(`  Episodes: ${marble.kg.user.episodes.length}`);
+  console.log(`  Clones: ${marble.kg.user.clones?.length || 0}`);
 }
 
 main().catch(console.error);

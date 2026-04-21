@@ -11,7 +11,7 @@
  *   7. investigate(opts)         → adaptive committee fills gaps
  */
 
-import { KnowledgeGraph } from './kg.js';
+import { KnowledgeGraph, DEFAULT_RECONCILIATION_RULES, DEFAULT_DECAY_CONFIG } from './kg.js';
 import { Scorer } from './scorer.js';
 import { ArcReranker } from './arc.js';
 import { Swarm } from './swarm.js';
@@ -58,6 +58,19 @@ export class Marble {
    * @param {number}   [opts.coldStartThreshold=10] - Signals needed before full personalization
    * @param {number}   [opts.cloneBoostWeight=0.3] - How much clone consensus influences scoring
    * @param {boolean}  [opts.silent=false] - Suppress construction-time warnings about missing providers
+   * @param {Object}   [opts.reconciliationRules] - Per-slot cardinality rules
+   *   for post-ingest reconciliation. Shape:
+   *   `{ beliefs: { topic: 'one'|'many' }, preferences: { type: 'one'|'many' }, identities: { role: 'one'|'many' } }`
+   *   Slots marked 'one' are collapsed to a single active fact after every
+   *   `ingestEpisodes()` / `ingestConversations()` call — older versions are
+   *   closed via `valid_to`. Unlisted slots retain 'many' (no forced
+   *   uniqueness). Pass `null` to fully disable reconciliation. Defaults to
+   *   `DEFAULT_RECONCILIATION_RULES` (a conservative starter set).
+   * @param {Object}   [opts.decayConfig] - Temporal-decay parameters for
+   *   `getActiveBeliefs/Preferences/Identities`. Shape:
+   *   `{ halfLifeDays, minEffectiveStrength }`. Defaults to half-life 365
+   *   days, threshold 0 (no filtering — back-compat preserved). Raise the
+   *   threshold to drop stale facts from the active view.
    */
   constructor({
     storage = './marble-kg.json',
@@ -69,8 +82,10 @@ export class Marble {
     coldStartThreshold = 10,
     cloneBoostWeight = 0.3,
     silent = false,
+    reconciliationRules = DEFAULT_RECONCILIATION_RULES,
+    decayConfig = DEFAULT_DECAY_CONFIG,
   } = {}) {
-    this.kg = new KnowledgeGraph(storage);
+    this.kg = new KnowledgeGraph(storage, { decayConfig });
     this.scorer = new Scorer(this.kg, { coldStartThreshold, embeddings });
     this.arc = new ArcReranker();
     this.count = count;
@@ -79,6 +94,7 @@ export class Marble {
     this.embeddings = embeddings;
     this.arcReorder = arcReorder;
     this.cloneBoostWeight = Math.max(0, Math.min(1, cloneBoostWeight));
+    this.reconciliationRules = reconciliationRules;
     this.ready = false;
 
     // Lazy-init containers
@@ -463,9 +479,15 @@ export class Marble {
    * Ingest a chat export (ChatGPT, Claude, generic) into the KG.
    * Extracts beliefs, preferences, identities, then runs inference pass.
    *
+   * This is a format-specific convenience wrapper. For arbitrary sources
+   * (journals, email, notes, anything textual), use `ingestEpisodes()` — it
+   * accepts a generic `Episode` shape you can produce from any adapter.
+   *
    * @param {string} filePath - Path to export JSON
    * @param {Object} [opts]
    * @param {boolean} [opts.runInference=true] - Run psychological inference pass
+   * @param {string}  [opts.sourceLabel] - Override the episode `source` label
+   *   (default: 'chat-export').
    * @returns {Promise<Object>} Ingestion stats
    */
   async ingestConversations(filePath, opts = {}) {
@@ -482,10 +504,65 @@ export class Marble {
     const result = await miner.ingestIntoKG(filePath, this.kg, {
       exchangeMode: opts.exchangeMode !== false,
       runInference: opts.runInference !== false,
+      sourceLabel: opts.sourceLabel,
     });
+
+    const reconciled = this._reconcile();
+    if (reconciled) result.reconciled = reconciled;
 
     await this.kg.save();
     return result;
+  }
+
+  /**
+   * Ingest generic episodes into the KG — the format-agnostic entry point.
+   *
+   * An `Episode` is the minimal shape Marble needs to build provenance:
+   *   { id?, source, source_date, content, metadata? }
+   *
+   * Pass whatever you can produce from your own sources. Marble will:
+   *   1. Record each episode in `kg.user.episodes[]` (dedup by id+content_hash)
+   *   2. Extract beliefs/preferences/identities from `content` via the LLM
+   *   3. Stamp every extracted fact with `valid_from = source_date`
+   *   4. Link each fact to its origin episode(s) via `evidence: [episode_id]`
+   *
+   * @param {Array<{id?: string, source?: string, source_date?: string, content: string, metadata?: object}>} episodes
+   * @param {Object} [opts]
+   * @param {boolean} [opts.runInference=true]
+   * @returns {Promise<Object>} Same stats shape as `ingestConversations()`
+   */
+  async ingestEpisodes(episodes, opts = {}) {
+    if (!this.llm) {
+      throw new Error('ingestEpisodes() requires an LLM provider.');
+    }
+    if (!this.ready) await this.init();
+
+    const { ConversationMiner } = await import('./conversation-miner.js');
+    const miner = new ConversationMiner(this.llm, {
+      onProgress: opts.onProgress || null,
+    });
+
+    const result = await miner.ingestEpisodesIntoKG(episodes, this.kg, {
+      runInference: opts.runInference !== false,
+    });
+
+    const reconciled = this._reconcile();
+    if (reconciled) result.reconciled = reconciled;
+
+    await this.kg.save();
+    return result;
+  }
+
+  /**
+   * Run the configured reconciliation rules against the KG.
+   * Returns the counts or null if reconciliation is disabled (rules === null).
+   * Callers that ingest via the miner directly can opt into reconciliation by
+   * calling `kg.reconcile()` themselves.
+   * @private
+   */
+  _reconcile() {
+    if (this.reconciliationRules === null) return null;
+    return this.kg.reconcile(this.reconciliationRules);
   }
 
   /**
@@ -511,7 +588,7 @@ export class Marble {
 // ═══════════════════════════════════════════════════════════
 // TIER 2: Core components (direct access for advanced use)
 // ═══════════════════════════════════════════════════════════
-export { KnowledgeGraph } from './kg.js';
+export { KnowledgeGraph, KG_VERSION, DEFAULT_RECONCILIATION_RULES, DEFAULT_DECAY_CONFIG } from './kg.js';
 export { Scorer } from './scorer.js';
 export { ArcReranker } from './arc.js';
 

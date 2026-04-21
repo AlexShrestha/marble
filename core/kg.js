@@ -9,11 +9,60 @@
  * - preference: Explicit preferences and patterns
  * - identity: Role/identity attributes about the user
  * - confidence: Confidence levels in knowledge areas
+ * - episode: Source record every fact can point back to
  */
 
 import { readFile, writeFile } from 'fs/promises';
+import { createHash } from 'crypto';
 import { extractEntityAttributes } from './entity-extractor.js';
 import { embeddings as defaultEmbeddings } from './embeddings.js';
+
+/**
+ * On-disk schema version. Bump when the saved JSON shape changes in a way that
+ * requires migration, and add a case to `#migrate()` below.
+ */
+export const KG_VERSION = 1;
+
+/**
+ * Default reconciliation rules — a conservative starter set that marks the
+ * most common single-value slots as cardinality "one" so that ingesting
+ * contradictory facts about them closes the older version automatically.
+ *
+ * Consumers can extend or fully replace this map via the `Marble` constructor
+ * option `reconciliationRules`. Unlisted slots retain "many" (no forced
+ * uniqueness) — a safe default that won't collapse distinct preferences.
+ */
+export const DEFAULT_RECONCILIATION_RULES = {
+  beliefs: {
+    current_city: 'one',
+    current_employer: 'one',
+    current_role: 'one',
+  },
+  preferences: {
+    primary_diet: 'one',
+    primary_language: 'one',
+    time_zone: 'one',
+  },
+  identities: {
+    current_city: 'one',
+    current_employer: 'one',
+    current_role: 'one',
+    current_school: 'one',
+  },
+};
+
+/**
+ * Default decay configuration for `getActive*` views. Half-life controls how
+ * fast `effective_strength = strength * 2^(-age_days / halfLifeDays)` shrinks
+ * as facts age. Threshold 0 preserves the pre-decay behaviour — nothing is
+ * filtered out unless consumers explicitly raise it. Historical queries
+ * (`asOf` in the past) compute age relative to that point, not today, so
+ * `getStateAt()` is unaffected.
+ */
+export const DEFAULT_DECAY_CONFIG = {
+  halfLifeDays: 365,
+  minEffectiveStrength: 0,
+};
 
 /**
  * Walk `src` and return a version with any unclosed `{`, `[`, or `"` closed
@@ -216,7 +265,7 @@ function _extractKeywordsFromText(text, limit = 5) {
 }
 
 export class KnowledgeGraph {
-  constructor(dataPath) {
+  constructor(dataPath, opts = {}) {
     this.dataPath = dataPath;
     this.user = null;
     this.items = new Map();
@@ -226,6 +275,9 @@ export class KnowledgeGraph {
     // Native vector index: node_id → Float32Array embedding
     this._vectorIndex = new Map();
     this._vectorIndexMeta = new Map();   // node_id → { type, node, text }
+    // Decay config — overridable per-instance so consumers with long-lived
+    // facts (preferences that rarely change) can use a longer half-life.
+    this.decayConfig = { ...DEFAULT_DECAY_CONFIG, ...(opts.decayConfig || {}) };
   }
 
   /**
@@ -242,16 +294,35 @@ export class KnowledgeGraph {
       const data = JSON.parse(raw);
       this.user = data.user || this.#defaultUser();
       this._dimensionalPreferences = data._dimensionalPreferences || [];
+      this.version = data.version ?? 0;
+      if (this.version < KG_VERSION) this.#migrate();
       return this;
     } catch {
       this.user = this.#defaultUser();
       this._dimensionalPreferences = [];
+      this.version = KG_VERSION;
       return this;
     }
   }
 
+  /**
+   * Forward-migrate the in-memory KG from whatever `this.version` was loaded
+   * to `KG_VERSION`. Runs on every load when the on-disk file predates the
+   * current schema — migrations must be idempotent and safe to run repeatedly.
+   *
+   * Migration map:
+   *   0 → 1: add `episodes: []` to user
+   */
+  #migrate() {
+    if (this.version < 1) {
+      if (!Array.isArray(this.user.episodes)) this.user.episodes = [];
+    }
+    this.version = KG_VERSION;
+  }
+
   async save() {
     const data = {
+      version: KG_VERSION,
       user: this.user,
       _dimensionalPreferences: this._dimensionalPreferences,
       updated_at: new Date().toISOString()
@@ -452,9 +523,18 @@ export class KnowledgeGraph {
    * @param {string} topic - Topic or domain
    * @param {string} claim - The belief statement
    * @param {number} strength - Belief strength (0-1)
+   * @param {Object} [opts]
+   * @param {string} [opts.validFrom] - ISO date when this belief became true in
+   *   the real world (source date). Defaults to now. Pass the source timestamp
+   *   here so temporal queries work against the source timeline, not the
+   *   ingest timeline.
+   * @param {string} [opts.episodeId] - Provenance pointer. Appended to the
+   *   fact's `evidence: [episode_id]` array so `getFactProvenance()` can trace
+   *   back to the source.
    */
-  addBelief(topic, claim, strength = 0.7) {
+  addBelief(topic, claim, strength = 0.7, opts = {}) {
     const now = new Date().toISOString();
+    const validFrom = opts.validFrom || now;
     const active = this.user.beliefs.find(b =>
       b.topic.toLowerCase() === topic.toLowerCase() && !b.valid_to
     );
@@ -465,20 +545,25 @@ export class KnowledgeGraph {
         active.strength = Math.min(1, strength);
         active.evidence_count = (active.evidence_count || 0) + 1;
         active.recorded_at = now;
+        if (opts.episodeId) this.#linkEvidence(active, opts.episodeId);
         return;
       }
-      // Contradiction: close old fact
-      active.valid_to = now;
+      // Contradiction: close old fact. Use the incoming validFrom (source
+      // date) so the closure lines up on the source timeline, not wall-clock.
+      active.valid_to = validFrom;
     }
 
-    this.user.beliefs.push({
+    const fact = {
       topic, claim,
       strength: Math.min(1, strength),
       evidence_count: 1,
-      valid_from: now,
+      valid_from: validFrom,
       valid_to: null,
-      recorded_at: now
-    });
+      recorded_at: now,
+      evidence: [],
+    };
+    if (opts.episodeId) this.#linkEvidence(fact, opts.episodeId);
+    this.user.beliefs.push(fact);
   }
 
   /**
@@ -495,16 +580,25 @@ export class KnowledgeGraph {
 
   /**
    * Return all beliefs that are active (valid_to is null or > asOf).
+   *
+   * Each returned belief is a shallow copy with two extra fields computed at
+   * read time:
+   *   - `effective_strength = strength * 2^(-age_days / halfLifeDays)`
+   *   - `age_days` (relative to `asOf`)
+   *
+   * Stored facts are not mutated. When `decayConfig.minEffectiveStrength > 0`,
+   * facts whose effective strength falls below the threshold are filtered
+   * out — this is how consumers ask "ignore stale facts" without changing
+   * the underlying data. Threshold defaults to 0 so back-compat is preserved.
+   *
    * @param {string} [asOf] - ISO date; defaults to now
-   * @returns {Array} Active beliefs
+   * @param {Object} [opts]
+   * @param {number} [opts.halfLifeDays] - Override instance half-life
+   * @param {number} [opts.minEffectiveStrength] - Override instance threshold
+   * @returns {Array} Active beliefs with `effective_strength` + `age_days`
    */
-  getActiveBeliefs(asOf) {
-    const ts = asOf ? new Date(asOf).getTime() : Date.now();
-    return this.user.beliefs.filter(b => {
-      const from = b.valid_from ? new Date(b.valid_from).getTime() : 0;
-      const to = b.valid_to ? new Date(b.valid_to).getTime() : Infinity;
-      return from <= ts && ts < to;
-    });
+  getActiveBeliefs(asOf, opts = {}) {
+    return this.#filterActive(this.user.beliefs, asOf, opts);
   }
 
   /**
@@ -513,9 +607,14 @@ export class KnowledgeGraph {
    * @param {string} type - Preference type (e.g., "content_style", "format", "tone")
    * @param {string} description - What the preference is
    * @param {number} strength - Preference strength (-1 to 1)
+   * @param {Object} [opts]
+   * @param {string} [opts.validFrom] - ISO date when this preference became
+   *   true (source date). Defaults to now.
+   * @param {string} [opts.episodeId] - Provenance pointer.
    */
-  addPreference(type, description, strength = 0.7) {
+  addPreference(type, description, strength = 0.7, opts = {}) {
     const now = new Date().toISOString();
+    const validFrom = opts.validFrom || now;
     const active = this.user.preferences.find(p =>
       p.type.toLowerCase() === type.toLowerCase() &&
       p.description.toLowerCase() === description.toLowerCase() &&
@@ -526,16 +625,20 @@ export class KnowledgeGraph {
       // Reinforce — update strength in place
       active.strength = Math.max(-1, Math.min(1, strength));
       active.recorded_at = now;
+      if (opts.episodeId) this.#linkEvidence(active, opts.episodeId);
       return;
     }
 
-    this.user.preferences.push({
+    const fact = {
       type, description,
       strength: Math.max(-1, Math.min(1, strength)),
-      valid_from: now,
+      valid_from: validFrom,
       valid_to: null,
-      recorded_at: now
-    });
+      recorded_at: now,
+      evidence: [],
+    };
+    if (opts.episodeId) this.#linkEvidence(fact, opts.episodeId);
+    this.user.preferences.push(fact);
   }
 
   /**
@@ -552,16 +655,15 @@ export class KnowledgeGraph {
 
   /**
    * Return all preferences that are currently active.
+   * Adds `effective_strength` + `age_days` the same way `getActiveBeliefs()`
+   * does; see that method for the decay semantics.
+   *
    * @param {string} [asOf] - ISO date; defaults to now
-   * @returns {Array} Active preferences
+   * @param {Object} [opts]
+   * @returns {Array} Active preferences with computed freshness fields
    */
-  getActivePreferences(asOf) {
-    const ts = asOf ? new Date(asOf).getTime() : Date.now();
-    return this.user.preferences.filter(p => {
-      const from = p.valid_from ? new Date(p.valid_from).getTime() : 0;
-      const to = p.valid_to ? new Date(p.valid_to).getTime() : Infinity;
-      return from <= ts && ts < to;
-    });
+  getActivePreferences(asOf, opts = {}) {
+    return this.#filterActive(this.user.preferences, asOf, opts);
   }
 
   /**
@@ -570,9 +672,14 @@ export class KnowledgeGraph {
    * @param {string} role - Identity role (e.g., "engineer", "founder", "investor")
    * @param {string} context - Context for this identity
    * @param {number} salience - How central this identity is (0-1)
+   * @param {Object} [opts]
+   * @param {string} [opts.validFrom] - ISO date when this identity became
+   *   true (source date). Defaults to now.
+   * @param {string} [opts.episodeId] - Provenance pointer.
    */
-  addIdentity(role, context = '', salience = 0.8) {
+  addIdentity(role, context = '', salience = 0.8, opts = {}) {
     const now = new Date().toISOString();
+    const validFrom = opts.validFrom || now;
     const active = this.user.identities.find(i =>
       i.role.toLowerCase() === role.toLowerCase() && !i.valid_to
     );
@@ -582,19 +689,243 @@ export class KnowledgeGraph {
         // Reinforce
         active.salience = Math.min(1, salience);
         active.recorded_at = now;
+        if (opts.episodeId) this.#linkEvidence(active, opts.episodeId);
         return;
       }
-      // Role context changed — close old
-      active.valid_to = now;
+      // Role context changed — close old, align to source timeline.
+      active.valid_to = validFrom;
     }
 
-    this.user.identities.push({
+    const fact = {
       role, context,
       salience: Math.min(1, salience),
-      valid_from: now,
+      valid_from: validFrom,
       valid_to: null,
-      recorded_at: now
-    });
+      recorded_at: now,
+      evidence: [],
+    };
+    if (opts.episodeId) this.#linkEvidence(fact, opts.episodeId);
+    this.user.identities.push(fact);
+  }
+
+  // ── Episodes (first-class source records) ──────────────
+
+  /**
+   * Record (or look up) a source episode. An episode is one concrete piece of
+   * input material — a chat conversation, a journal entry, an email thread —
+   * that facts can point back to via their `evidence: [episode_id]` array.
+   *
+   * Idempotent: if an episode with a matching `id` OR matching `content_hash`
+   * already exists, the existing one is returned. This lets the miner safely
+   * re-ingest the same file without creating duplicate episodes, and lets two
+   * different consumers converge on the same record when they happen to
+   * produce the same content.
+   *
+   * @param {Object} ep
+   * @param {string} [ep.id] - Consumer-supplied ID; auto-generated if omitted.
+   * @param {string} [ep.source='unknown'] - Free-form label (e.g. "chatgpt",
+   *   "gmail", "notes"). Consumers own the namespace.
+   * @param {string} [ep.source_date] - ISO date when the episode happened in
+   *   the real world. Null if unknown — fall back explicitly rather than
+   *   silently stamping "now".
+   * @param {string} [ep.content] - Raw text; hashed and summarised, not stored
+   *   verbatim (KGs are not blob stores).
+   * @param {string} [ep.content_summary] - Optional pre-computed summary.
+   * @param {Object} [ep.metadata] - Opaque consumer-side extras.
+   * @returns {Object} The canonical episode record.
+   */
+  addEpisode(ep = {}) {
+    if (!Array.isArray(this.user.episodes)) this.user.episodes = [];
+    const content = ep.content ?? '';
+    const content_hash = ep.content_hash || (content
+      ? createHash('sha256').update(content).digest('hex').slice(0, 16)
+      : null);
+    const now = new Date().toISOString();
+
+    // Dedup: prefer explicit id, fall back to hash. Returning the existing
+    // record (not a new one) lets callers repeatedly call addEpisode() during
+    // re-ingests without bloating the KG.
+    const existing = this.user.episodes.find(e =>
+      (ep.id && e.id === ep.id) ||
+      (content_hash && e.content_hash === content_hash)
+    );
+    if (existing) return existing;
+
+    const id = ep.id || `ep_${Date.now()}_${this.user.episodes.length}`;
+    const record = {
+      id,
+      source: ep.source || 'unknown',
+      source_date: ep.source_date || null,
+      ingested_at: now,
+      content_hash,
+      content_summary: ep.content_summary || (content ? content.slice(0, 200) : null),
+      ...(ep.metadata ? { metadata: ep.metadata } : {}),
+    };
+    this.user.episodes.push(record);
+    return record;
+  }
+
+  /**
+   * Look up an episode by id.
+   * @param {string} id
+   * @returns {Object|null}
+   */
+  getEpisode(id) {
+    return (this.user.episodes || []).find(e => e.id === id) || null;
+  }
+
+  /**
+   * Return the episode records that back a given fact — the provenance trail.
+   * Accepts either a fact object directly or a `{ type, topic }` selector.
+   *
+   * @param {Object} ref - `{ evidence: [...] }` or `{ type, topic }` or `{ type, role }`
+   * @returns {Array<Object>} Episode records in the order they were linked.
+   */
+  getFactProvenance(ref) {
+    if (!ref) return [];
+    let fact = ref;
+    if (!Array.isArray(ref.evidence) && (ref.type || ref.kind)) {
+      const type = ref.type || ref.kind;
+      const key = (ref.topic || ref.role || ref.type || '').toLowerCase();
+      const collection = type === 'belief' ? this.user.beliefs
+        : type === 'preference' ? this.user.preferences
+        : type === 'identity' ? this.user.identities
+        : [];
+      fact = collection.find(f => {
+        const k = (f.topic || f.type || f.role || '').toLowerCase();
+        return k === key && !f.valid_to;
+      });
+    }
+    if (!fact || !Array.isArray(fact.evidence)) return [];
+    return fact.evidence
+      .map(id => this.getEpisode(id))
+      .filter(Boolean);
+  }
+
+  #linkEvidence(fact, episodeId) {
+    if (!Array.isArray(fact.evidence)) fact.evidence = [];
+    if (!fact.evidence.includes(episodeId)) fact.evidence.push(episodeId);
+  }
+
+  /**
+   * Shared active-fact filter with temporal decay applied at read time.
+   * Used by `getActiveBeliefs/Preferences/Identities`.
+   *
+   * Decays `strength` (or `salience` for identities) with a half-life on
+   * `valid_from → asOf`. Returns shallow copies with `effective_strength`
+   * and `age_days` appended; the stored facts are never mutated. Callers
+   * who set `minEffectiveStrength > 0` get stale facts filtered out; the
+   * default threshold of 0 preserves pre-decay behaviour.
+   *
+   * @private
+   */
+  #filterActive(collection, asOf, opts = {}) {
+    const ts = asOf ? new Date(asOf).getTime() : Date.now();
+    const halfLife = opts.halfLifeDays ?? this.decayConfig.halfLifeDays;
+    const threshold = opts.minEffectiveStrength ?? this.decayConfig.minEffectiveStrength;
+    const halfLifeMs = halfLife * 86_400_000;
+    const results = [];
+
+    for (const fact of collection) {
+      const from = fact.valid_from ? new Date(fact.valid_from).getTime() : 0;
+      const to = fact.valid_to ? new Date(fact.valid_to).getTime() : Infinity;
+      if (!(from <= ts && ts < to)) continue;
+
+      // Base score: `strength` for beliefs/preferences, `salience` for
+      // identities. Fall back to 0.5 if neither is present (defensive).
+      const baseStrength = typeof fact.strength === 'number'
+        ? fact.strength
+        : (typeof fact.salience === 'number' ? fact.salience : 0.5);
+
+      // Age measured from the fact's source date, not ingest date — so
+      // imported-old facts age correctly. Negative ages (future-dated) are
+      // clamped to 0 so the decay term never exceeds 1.
+      const ageMs = Math.max(0, ts - from);
+      const effectiveStrength = halfLifeMs > 0
+        ? baseStrength * Math.pow(0.5, ageMs / halfLifeMs)
+        : baseStrength;
+
+      if (effectiveStrength < threshold) continue;
+
+      results.push({
+        ...fact,
+        effective_strength: effectiveStrength,
+        age_days: ageMs / 86_400_000,
+      });
+    }
+    return results;
+  }
+
+  // ── Reconciliation ─────────────────────────────────────
+
+  /**
+   * Sweep active facts and enforce cardinality on slots listed as "one" in
+   * the rules. For each such slot, keep only the newest active fact; every
+   * older one gets `valid_to` set to the newer fact's `valid_from` so the
+   * timeline reads as a clean handoff, not an overlap.
+   *
+   * Idempotent — re-running changes nothing when the graph is already
+   * reconciled. Safe to call after every ingest.
+   *
+   * Rule shape:
+   *   {
+   *     beliefs:     { [topic]: 'one' | 'many' },
+   *     preferences: { [type]:  'one' | 'many' },
+   *     identities:  { [role]:  'one' | 'many' }
+   *   }
+   *
+   * Only 'one' slots are acted on. Unlisted or 'many' slots keep their
+   * existing (possibly multiple) active facts untouched.
+   *
+   * @param {Object} [rules] - Rule map; defaults to `DEFAULT_RECONCILIATION_RULES`
+   * @returns {{ beliefs_invalidated: number, preferences_invalidated: number, identities_invalidated: number }}
+   */
+  reconcile(rules = DEFAULT_RECONCILIATION_RULES) {
+    const merged = {
+      beliefs: { ...(rules?.beliefs || {}) },
+      preferences: { ...(rules?.preferences || {}) },
+      identities: { ...(rules?.identities || {}) },
+    };
+
+    const sweep = (collection, ruleMap, keyFn) => {
+      // Bucket active facts by lowercase slot key. Only enforce on slots the
+      // consumer explicitly marked 'one'.
+      const buckets = new Map();
+      for (const fact of collection) {
+        if (fact.valid_to) continue;
+        const key = (keyFn(fact) || '').toLowerCase();
+        if (!key) continue;
+        const rule = ruleMap[key] || ruleMap[keyFn(fact)]; // exact-case fallback
+        if (rule !== 'one') continue;
+        if (!buckets.has(key)) buckets.set(key, []);
+        buckets.get(key).push(fact);
+      }
+
+      let invalidated = 0;
+      for (const group of buckets.values()) {
+        if (group.length < 2) continue;
+        // Sort by valid_from ascending, keep newest, close the rest at the
+        // newest's valid_from (so the timeline is a clean handoff).
+        group.sort((a, b) => {
+          const aT = a.valid_from ? new Date(a.valid_from).getTime() : 0;
+          const bT = b.valid_from ? new Date(b.valid_from).getTime() : 0;
+          return aT - bT;
+        });
+        const newest = group[group.length - 1];
+        for (const older of group.slice(0, -1)) {
+          older.valid_to = newest.valid_from || new Date().toISOString();
+          older.invalidation_reason = older.invalidation_reason || 'reconciled';
+          invalidated += 1;
+        }
+      }
+      return invalidated;
+    };
+
+    return {
+      beliefs_invalidated: sweep(this.user.beliefs, merged.beliefs, f => f.topic),
+      preferences_invalidated: sweep(this.user.preferences, merged.preferences, f => f.type),
+      identities_invalidated: sweep(this.user.identities, merged.identities, f => f.role),
+    };
   }
 
   /**
@@ -608,16 +939,14 @@ export class KnowledgeGraph {
 
   /**
    * Return all identities that are currently active.
+   * Adds `effective_strength` (derived from `salience`) and `age_days`.
+   *
    * @param {string} [asOf] - ISO date; defaults to now
-   * @returns {Array} Active identities
+   * @param {Object} [opts]
+   * @returns {Array} Active identities with computed freshness fields
    */
-  getActiveIdentities(asOf) {
-    const ts = asOf ? new Date(asOf).getTime() : Date.now();
-    return this.user.identities.filter(i => {
-      const from = i.valid_from ? new Date(i.valid_from).getTime() : 0;
-      const to = i.valid_to ? new Date(i.valid_to).getTime() : Infinity;
-      return from <= ts && ts < to;
-    });
+  getActiveIdentities(asOf, opts = {}) {
+    return this.#filterActive(this.user.identities, asOf, opts);
   }
 
   /**
@@ -991,11 +1320,12 @@ export class KnowledgeGraph {
       history: [],
       source_trust: {},
       // Layer 1: Typed Memory Nodes
-      beliefs: [],        // Core beliefs: { topic, claim, strength (0-1), evidence_count }
-      preferences: [],    // Explicit preferences: { type, description, strength (0-1) }
-      identities: [],     // Identity attributes: { role, context, salience (0-1) }
+      beliefs: [],        // Core beliefs: { topic, claim, strength (0-1), evidence_count, evidence: [episode_id] }
+      preferences: [],    // Explicit preferences: { type, description, strength (0-1), evidence: [episode_id] }
+      identities: [],     // Identity attributes: { role, context, salience (0-1), evidence: [episode_id] }
       confidence: {},     // Confidence by domain: { domain: confidence_score (0-1) }
-      clones: []          // UserClone hypothesis array
+      clones: [],         // UserClone hypothesis array
+      episodes: []        // Source records: { id, source, source_date, ingested_at, content_hash, content_summary?, metadata? }
     };
   }
 

@@ -608,6 +608,131 @@ export class KnowledgeGraph {
   }
 
   /**
+   * Return a trimmed, caller-friendly view of the active belief on `topic`.
+   *
+   * The full fact object (with every internal field) is available via
+   * `getBelief()`; this method is for consumers who just want to render or
+   * filter the belief without reaching into internals. Freshness uses the
+   * temporal-decay `age_days`; `confidence` uses the decayed
+   * `effective_strength`. `top_sources` resolves evidence episode ids to
+   * short refs (`{ id, source, source_date }`) so provenance can be
+   * displayed without a second lookup.
+   *
+   * @param {string} topic
+   * @param {Object} [opts]
+   * @param {string} [opts.asOf]
+   * @param {number} [opts.minConfidence] - Reject if effective_strength is below this
+   * @param {number} [opts.maxFreshnessDays] - Reject if older than this
+   * @param {number} [opts.topSources=3] - How many episode refs to include
+   * @returns {{ value: string, confidence: number, freshness_days: number, evidence_count: number, top_sources: Array<{ id, source, source_date }> }|null}
+   */
+  getActiveBelief(topic, opts = {}) {
+    const fact = this.getActiveBeliefs(opts.asOf, opts).find(
+      b => b.topic.toLowerCase() === topic.toLowerCase()
+    );
+    return this.#viewFact(fact, 'belief', opts);
+  }
+
+  /**
+   * Singular rich-view accessor for preferences. When multiple preferences
+   * exist on the same `type` (e.g. many "favorite_music" entries), returns
+   * the one with the highest effective_strength — "give me the canonical
+   * answer for this slot". Pass `description` to target a specific one.
+   *
+   * @param {string} type
+   * @param {Object} [opts]
+   * @param {string} [opts.description] - Disambiguate when type has many entries
+   * @param {string} [opts.asOf]
+   * @param {number} [opts.minConfidence]
+   * @param {number} [opts.maxFreshnessDays]
+   * @param {number} [opts.topSources=3]
+   * @returns {{ value: string, confidence: number, freshness_days: number, evidence_count?: number, top_sources: Array }|null}
+   */
+  getActivePreference(type, opts = {}) {
+    const candidates = this.getActivePreferences(opts.asOf, opts)
+      .filter(p => p.type.toLowerCase() === type.toLowerCase());
+    if (candidates.length === 0) return null;
+    let fact;
+    if (opts.description) {
+      fact = candidates.find(p => p.description.toLowerCase() === opts.description.toLowerCase());
+    } else {
+      // Multi-entry slots (e.g. "favorite_music") — pick the strongest active
+      // entry so there's a single canonical answer to "what's their X?".
+      fact = candidates.reduce((best, p) =>
+        (p.effective_strength ?? p.strength ?? 0) > (best.effective_strength ?? best.strength ?? 0) ? p : best
+      );
+    }
+    return this.#viewFact(fact, 'preference', opts);
+  }
+
+  /**
+   * Singular rich-view accessor for identities.
+   *
+   * @param {string} role
+   * @param {Object} [opts]
+   * @param {string} [opts.asOf]
+   * @param {number} [opts.minConfidence]
+   * @param {number} [opts.maxFreshnessDays]
+   * @param {number} [opts.topSources=3]
+   * @returns {{ value: string, confidence: number, freshness_days: number, top_sources: Array }|null}
+   */
+  getActiveIdentity(role, opts = {}) {
+    const fact = this.getActiveIdentities(opts.asOf, opts).find(
+      i => i.role.toLowerCase() === role.toLowerCase()
+    );
+    return this.#viewFact(fact, 'identity', opts);
+  }
+
+  /**
+   * Shared "rich view" projection. Extracted so all three singular
+   * accessors produce the same shape and honour the same filter options.
+   * @private
+   */
+  #viewFact(fact, kind, opts = {}) {
+    if (!fact) return null;
+
+    // `effective_strength` / `age_days` are attached by `#filterActive`.
+    // If a caller bypassed the public accessors (addX → user.beliefs) the
+    // fact may not have them yet — fall back to the raw strength/salience
+    // and skip freshness rather than emitting garbage numbers.
+    const confidence = typeof fact.effective_strength === 'number'
+      ? fact.effective_strength
+      : (typeof fact.strength === 'number' ? fact.strength
+        : (typeof fact.salience === 'number' ? fact.salience : 0));
+    const freshness_days = typeof fact.age_days === 'number' ? fact.age_days : null;
+
+    const minConfidence = typeof opts.minConfidence === 'number' ? opts.minConfidence : null;
+    if (minConfidence !== null && confidence < minConfidence) return null;
+    if (
+      typeof opts.maxFreshnessDays === 'number'
+      && freshness_days !== null
+      && freshness_days > opts.maxFreshnessDays
+    ) return null;
+
+    const topN = opts.topSources ?? 3;
+    const top_sources = Array.isArray(fact.evidence)
+      ? fact.evidence.slice(0, topN)
+        .map(id => this.getEpisode(id))
+        .filter(Boolean)
+        .map(e => ({ id: e.id, source: e.source, source_date: e.source_date }))
+      : [];
+
+    // Use the right "value" field per kind.
+    const value = kind === 'belief' ? fact.claim
+      : kind === 'preference' ? fact.description
+      : fact.context;
+
+    const view = {
+      value,
+      confidence,
+      freshness_days,
+      top_sources,
+    };
+    if (typeof fact.evidence_count === 'number') view.evidence_count = fact.evidence_count;
+    return view;
+  }
+
+  /**
    * Return all beliefs that are active (valid_to is null or > asOf).
    *
    * Each returned belief is a shallow copy with two extra fields computed at

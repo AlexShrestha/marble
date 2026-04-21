@@ -10,22 +10,47 @@ jobs:
   insight-committee:
     name: Run psychological probe committee (DeepSeek)
     runs-on: ubuntu-latest
-    # Skip when DeepSeek secrets aren't configured (PRs from forks, server down)
-    if: ${{ secrets.DEEPSEEK_BASE_URL != '' }}
+
+    # NOTE: a previous version of this workflow used a job-level
+    # `if: ${{ secrets.DEEPSEEK_BASE_URL != '' }}`. When the secret was
+    # missing (fork PRs, branches without secrets) the job skipped, leaving
+    # the workflow with zero completed jobs — which GitHub reports as
+    # "failure: this run likely failed because of a workflow file issue".
+    # The fix below keeps the job always running; the secret check is a
+    # step that sets an output, and the expensive steps gate off it. When
+    # secrets are missing, the job still completes successfully with a
+    # single notice.
 
     steps:
+      - name: Check DeepSeek secret availability
+        id: check
+        env:
+          DEEPSEEK_BASE_URL: ${{ secrets.DEEPSEEK_BASE_URL }}
+        run: |
+          if [ -n "${DEEPSEEK_BASE_URL}" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+            echo "DeepSeek secrets present — running insight committee probe"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Insight committee skipped::DEEPSEEK_BASE_URL secret not configured; skipping probe. This is expected on fork PRs or when the DeepSeek server is intentionally offline."
+          fi
+
       - uses: actions/checkout@v4
+        if: steps.check.outputs.configured == 'true'
 
       - name: Use Node.js 20
+        if: steps.check.outputs.configured == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: '20.x'
           cache: 'npm'
 
       - name: Install dependencies
+        if: steps.check.outputs.configured == 'true'
         run: npm ci
 
       - name: Run insight committee
+        if: steps.check.outputs.configured == 'true'
         env:
           LLM_PROVIDER: deepseek
           DEEPSEEK_BASE_URL: ${{ secrets.DEEPSEEK_BASE_URL }}

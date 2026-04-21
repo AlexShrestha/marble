@@ -54,6 +54,7 @@ import { ArcReranker } from './arc.js';
 import { Swarm } from './swarm.js';
 import { Clone } from './clone.js';
 import { decayPass } from './decay.js';
+import { createReasoningBundle, recordLayerContribution, summarizeBundle } from './reasoning-bundle.js';
 
 // Module-level flags so missing-provider warnings fire at most once per
 // process, not once per `new Marble()`. Batch workloads (one instance per
@@ -360,6 +361,12 @@ export class Marble {
    * @param {boolean} [opts.allowDegraded=true] - When false, throws
    *   LearnDegradedError if any stage fails. Default true so callers that
    *   don't read `failures` still get a usable result.
+   * @param {Array<Function>} [opts.extraStages] - Plugin hook for new
+   *   reasoning layers. Each stage is an `async (bundle, kg) => void`
+   *   function that reads the current reasoning bundle and adds its
+   *   contribution. The stage's `name` is recorded in `bundle.layers_fired`.
+   *   Use `bundle.extensions[layerName]` to store outputs that don't fit
+   *   the canonical fields. See `core/reasoning-bundle.js` for shape.
    * @returns {Promise<{
    *   insights: number,
    *   candidates: number,
@@ -372,15 +379,23 @@ export class Marble {
    *     identities_added: number, identities_invalidated: number,
    *     clones_seeded: number, clones_bred: number, clones_killed: number,
    *     insights_generated: number, candidates_generated: number
-   *   }
+   *   },
+   *   bundle: import('./reasoning-bundle.js').MarbleReasoningBundle
    * }>}
    */
   async learn(opts = {}) {
-    const { allowDegraded = true } = opts;
+    const { allowDegraded = true, extraStages = [] } = opts;
     if (!this.llm) {
       throw new Error('learn() requires an LLM provider. Pass { llm: yourLLMFunction } in constructor.');
     }
     if (!this.ready) await this.init();
+
+    // Build the canonical reasoning bundle. Each stage contributes to the
+    // same object so the final `result.bundle` is a complete, inspectable
+    // record of this run's inputs + outputs. Consumer-defined stages plug
+    // in via `opts.extraStages` and read/write the same bundle, which is
+    // what makes "adding a new layer" a plugin instead of a rewrite.
+    const bundle = createReasoningBundle(this.kg);
 
     const stages = {
       seedClones: 'skipped',
@@ -452,6 +467,7 @@ export class Marble {
     try {
       const { runInsightSwarm } = await import('./insight-swarm.js');
       insights = await runInsightSwarm(this.kg);
+      recordLayerContribution(bundle, 'insightSwarm', { insights });
       stages.insightSwarm = 'ok';
     } catch (err) {
       stages.insightSwarm = 'failed';
@@ -464,6 +480,7 @@ export class Marble {
       const { InferenceEngine } = await import('./inference-engine.js');
       const inference = new InferenceEngine(this.kg);
       candidates = await inference.run();
+      recordLayerContribution(bundle, 'inferenceEngine', { hypotheses: candidates });
       stages.inference = 'ok';
     } catch (err) {
       stages.inference = 'failed';
@@ -484,11 +501,35 @@ export class Marble {
 
       if (recentReactions.length > 0) {
         await this.clonePopulation.evolve(recentReactions);
+        // Clone evolution doesn't emit canonical bundle fields; record it
+        // fired so consumers can tell "was this cold?" from "did the layer
+        // run but not emit?".
+        recordLayerContribution(bundle, 'cloneEvolution', {
+          active_clones: this.kg.getActiveClones().length,
+        });
         stages.cloneEvolution = 'ok';
       }
     } catch (err) {
       stages.cloneEvolution = 'failed';
       pushFailure('cloneEvolution', err);
+    }
+
+    // Plugin hook: consumer-defined stages read and write the same bundle.
+    // Each stage runs under its own try/catch so a buggy third-party layer
+    // doesn't take down the whole learn() pipeline. Failures land in
+    // `failures` just like core-stage failures.
+    for (const [idx, stage] of extraStages.entries()) {
+      const stageName = stage.name || `extraStage_${idx}`;
+      try {
+        await stage(bundle, this.kg);
+        // If the stage didn't call recordLayerContribution itself, log it
+        // anyway so the run is provenance-complete.
+        if (!bundle.layers_fired.includes(stageName)) {
+          recordLayerContribution(bundle, stageName, {});
+        }
+      } catch (err) {
+        pushFailure(stageName, err);
+      }
     }
 
     // Stamp before save so the timestamp hits disk.
@@ -530,6 +571,11 @@ export class Marble {
       stages,
       failures,
       changes,
+      // Canonical bundle: inputs (L1 snapshot) + outputs (all layers'
+      // contributions, core and custom). `bundle_summary` is a count-only
+      // view suitable for logging without serialising the full arrays.
+      bundle,
+      bundle_summary: summarizeBundle(bundle),
     };
 
     if (!allowDegraded && failures.length > 0) {
@@ -807,3 +853,4 @@ export { MemoryLayers } from './memory-layers.js';
 // ═══════════════════════════════════════════════════════════
 export { SCORE_WEIGHTS, ARC_SLOTS } from './types.js';
 export { USE_CASE_PROFILES, createProfileConfig } from './use-case-profiles.js';
+export { createReasoningBundle, recordLayerContribution, summarizeBundle } from './reasoning-bundle.js';

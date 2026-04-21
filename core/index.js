@@ -4,11 +4,48 @@
  * Full pipeline lifecycle:
  *   1. init()                    → load KG, attach engines
  *   2. ingestConversations(path) → mine chat exports into KG
+ *      ingestEpisodes(episodes)  → generic entry point for any text source
  *   3. select(items, context)    → score + clone consensus + arc reorder
  *   4. react(item, reaction)     → record with entity extraction + TopicInsight
  *   5. reactSlate(reactions)     → contrastive analysis on full slate
  *   6. learn()                   → L1.5 insight swarm → L2 inference → L3 clone evolution
  *   7. investigate(opts)         → adaptive committee fills gaps
+ *   8. diagnose()                → KG health summary (counts, decay, last-run)
+ *
+ * ─── ONE SUBJECT PER KG ──────────────────────────────────────────────────
+ *
+ * Marble is SINGLE-SUBJECT by design. Every Marble instance models exactly
+ * one subject (a person, a team, a pet — whatever the consumer decides):
+ *
+ *   - `kg.user` is the root node; there is no `kg.users[]`
+ *   - Beliefs, preferences, identities, interests are all facts ABOUT that
+ *     one subject
+ *   - Episodes attribute observations about that subject
+ *
+ * This is intentional, not a bug. The consumer owns multi-subject routing:
+ *
+ *   // Per-subject Marble instance, each backed by its own storage file.
+ *   const marbles = new Map();
+ *   function marbleFor(subjectId) {
+ *     if (!marbles.has(subjectId)) {
+ *       marbles.set(subjectId, new Marble({
+ *         storage: `./kg/${subjectId}.json`,
+ *         llm,
+ *       }));
+ *     }
+ *     return marbles.get(subjectId);
+ *   }
+ *
+ * Multi-subject schemas tend to drag in ambiguity about WHO a fact is about,
+ * which breaks reconciliation and entity resolution (a single slot like
+ * `current_city` only makes sense per subject). Keeping one-per-instance
+ * preserves clean contradiction semantics and lets consumers compose via
+ * storage paths rather than query filters.
+ *
+ * If you ingest text that mentions other people (family, colleagues, public
+ * figures), those entities live in `kg.user.entities[]` as referenced
+ * entities — the subject of the KG stays `kg.user`, and facts about other
+ * people can be modelled as identities the subject holds about them.
  */
 
 import { KnowledgeGraph, DEFAULT_RECONCILIATION_RULES, DEFAULT_DECAY_CONFIG, DEFAULT_ENTITY_RESOLUTION } from './kg.js';

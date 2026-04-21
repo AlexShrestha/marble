@@ -1,0 +1,105 @@
+{
+  "_readme": "Regression fixture for parser edge cases fixed in 25213c1 and related. Do NOT sanitize — every quirk here corresponds to a real shape seen in production ChatGPT / Claude exports that once broke Marble's miner.",
+  "conversations": [
+    {
+      "title": "modern ChatGPT export with author.role",
+      "create_time": 1704067200,
+      "mapping": {
+        "client-created-root": {
+          "message": null,
+          "parent": null,
+          "children": ["msg-1"]
+        },
+        "msg-1": {
+          "message": {
+            "id": "msg-1",
+            "author": { "role": "user", "name": null },
+            "create_time": 1704067260,
+            "content": { "content_type": "text", "parts": ["I've been thinking about moving to Lisbon."] }
+          },
+          "parent": "client-created-root",
+          "children": ["msg-2"]
+        },
+        "msg-2": {
+          "message": {
+            "id": "msg-2",
+            "author": { "role": "assistant" },
+            "create_time": 1704067320,
+            "content": { "content_type": "text", "parts": ["What's drawing you there?"] }
+          },
+          "parent": "msg-1",
+          "children": ["msg-3"]
+        },
+        "msg-3": {
+          "message": {
+            "id": "msg-3",
+            "author": { "role": "system" },
+            "content": { "parts": ["(system instructions — should be filtered out)"] }
+          },
+          "parent": "msg-2",
+          "children": []
+        }
+      }
+    },
+    {
+      "title": "legacy ChatGPT export with direct role",
+      "create_time": 1577836800,
+      "mapping": {
+        "a": {
+          "message": {
+            "role": "user",
+            "content": { "parts": ["I run a small bakery in Barcelona."] }
+          }
+        },
+        "b": {
+          "message": {
+            "role": "assistant",
+            "content": { "parts": ["How long have you been there?"] }
+          }
+        },
+        "c": {
+          "message": null
+        },
+        "d": {
+          "message": {
+            "role": "user",
+            "content": { "parts": ["About 8 years. It's been the best decision I made."] }
+          }
+        }
+      }
+    },
+    {
+      "title": "Claude export format",
+      "created_at": "2023-08-15T12:00:00Z",
+      "chat_messages": [
+        { "sender": "human", "text": "I started running in 2022." },
+        { "sender": "assistant", "text": "What prompted the start?" },
+        { "sender": "human", "text": "I wanted to rebuild discipline after a tough year." }
+      ]
+    },
+    {
+      "title": "mapping with unusual but real shapes",
+      "create_time": 1640995200,
+      "mapping": {
+        "string-content": {
+          "message": {
+            "author": { "role": "user" },
+            "content": "I prefer deep work to meetings."
+          }
+        },
+        "non-string-part": {
+          "message": {
+            "author": { "role": "user" },
+            "content": { "parts": [{ "type": "image_url", "url": "..." }, "Also: I write every morning."] }
+          }
+        },
+        "empty-parts": {
+          "message": {
+            "author": { "role": "user" },
+            "content": { "parts": [] }
+          }
+        }
+      }
+    }
+  ]
+}

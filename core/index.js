@@ -598,6 +598,46 @@ export class Marble {
   }
 
   /**
+   * Rebuild derived indexes and scan for patterns that only surface in the
+   * time series of the KG, not the current snapshot.
+   *
+   * Currently runs:
+   *   - Churn scan: detects slots (`belief:topic`, `preference:type`,
+   *     `identity:role`) that have been reassigned ≥ N times in the
+   *     trailing window. Emits `origin: "churn_pattern"` syntheses so
+   *     downstream tools can treat "this user serial-pivots projects" as a
+   *     first-class trait.
+   *
+   * Use this when you change the salience weights, after a bug fix in
+   * inference logic, or periodically (e.g. weekly) to pick up churn patterns
+   * that event-driven inference wouldn't surface. It does NOT re-run the
+   * LLM-heavy paths (learn / synthesize / investigate) — it's a cheap,
+   * deterministic pass.
+   *
+   * Persists results via `kg.addSynthesis()` and saves the KG.
+   *
+   * @param {Object} [opts] - forwarded to runChurnScan in salience.js
+   * @returns {Promise<{ churnSyntheses: Object[], distribution: Object }>}
+   */
+  async rebuild(opts = {}) {
+    if (!this.ready) await this.init();
+
+    const { runChurnScan } = await import('./salience.js');
+    const churn = runChurnScan(this.kg, opts);
+    const persisted = [];
+    for (const s of churn) {
+      persisted.push(this.kg.addSynthesis(s));
+    }
+
+    const distribution = this.kg.salienceDistribution(opts);
+
+    this.kg.user._last_rebuild_at = new Date().toISOString();
+    await this.kg.save();
+
+    return { churnSyntheses: persisted, distribution };
+  }
+
+  /**
    * Run L2 trait synthesis — derive psychological/behavioral traits from
    * individual facts, check whether those traits replicate across domains
    * or get contradicted elsewhere in the KG, and run a small K-way fusion

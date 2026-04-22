@@ -16,6 +16,7 @@ import { readFile, writeFile } from 'fs/promises';
 import { createHash } from 'crypto';
 import { extractEntityAttributes } from './entity-extractor.js';
 import { embeddings as defaultEmbeddings } from './embeddings.js';
+import { getTopSalient as _getTopSalient, salienceDistribution as _salienceDistribution } from './salience.js';
 
 /**
  * On-disk schema version. Bump when the saved JSON shape changes in a way that
@@ -1898,6 +1899,41 @@ Return ONLY the JSON object.`,
       bred += 1;
     }
     return { bred, failures };
+  }
+
+  // ── Salience (top-K filter before any pairwise pass) ────────────────────
+
+  /**
+   * Return the top-K most salient nodes across the requested L1 types.
+   * Salience folds strength × recency decay, evidence count, and slot
+   * volatility into a single 0-1 score. Stale one-off facts (valid_to=null
+   * but evidence_count=1 AND age>180d) are discounted via the stale-active
+   * guardrail — prevents old one-off beliefs from dominating.
+   *
+   * Use this INSTEAD of `getMemoryNodesSummary()` as the input to any
+   * pairwise or O(N²) inference pass. Works in constant memory relative
+   * to the output limit.
+   *
+   * @param {Object} [opts]
+   * @param {('belief'|'preference'|'identity')[]} [opts.types]
+   * @param {number}   [opts.limit=100]
+   * @param {string[]} [opts.domains] filter nodes whose `domain` field matches
+   * @param {string}   [opts.asOf]   ISO date for as-of queries
+   * @returns {Array<{node, type, ref, salience, effective_strength, slot_volatility, stale_active}>}
+   */
+  getTopSalient(opts = {}) {
+    return _getTopSalient(this, opts);
+  }
+
+  /**
+   * Diagnostic: salience distribution, stale-active counts, top-10 examples.
+   * Useful for answering "is this KG mostly signal or mostly ingestion noise?"
+   * without running a full inference pass.
+   *
+   * @returns {{ total, staleActive, percentiles, byType, topExamples }}
+   */
+  salienceDistribution(opts = {}) {
+    return _salienceDistribution(this, opts);
   }
 
   // ── Syntheses (L2 trait synthesis) ──────────────────────────────────────

@@ -423,11 +423,13 @@ export const CALIBRATION_STATUS = {
  */
 
 /**
- * @typedef {'single_node'|'trait_replication'|'contradiction'|'emergent_fusion'} SynthesisOrigin
+ * @typedef {'single_node'|'trait_replication'|'contradiction'|'emergent_fusion'|'churn_pattern'} SynthesisOrigin
  *   - single_node: trait implied by exactly one node — low confidence by design
  *   - trait_replication: same trait implied by multiple nodes, optionally across domains
  *   - contradiction: same dimension, divergent values from disjoint node sets
  *   - emergent_fusion: gestalt pattern from K-way cross-domain sample; no single-node derivation
+ *   - churn_pattern: the pattern IS the rate of slot reassignment — "serial pivoter"
+ *     traits that live in the time series of invalidations, not the current snapshot
  */
 
 /**

@@ -33,8 +33,17 @@ export class InferenceEngine extends EventEmitter {
   }
 
   /**
-   * Run L2 inference: read L1 facts, generate candidates, queue them.
-   * Returns array of candidates that passed the gate (confidence >= 0.65, >=2 supporting facts)
+   * Run L2 inference.
+   *
+   * Reads L1.5 insights + top-salient L1 facts (capped via `getTopSalient`),
+   * runs the remaining linear generators (temporal patterns), gates, queues.
+   *
+   * The old quadratic generators (`_inferFromBelief`, `_inferFromPreferenceIdentity`,
+   * `_inferFromConfidenceGaps`) were removed — they emitted template strings
+   * with no semantic content and blew up on real-sized KGs. Cross-L1 pattern
+   * discovery now lives in `runTraitSynthesis()` (LLM-directed, bounded).
+   *
+   * Returns candidates that passed the gate (confidence >= 0.65, >=2 supporting facts).
    */
   async run() {
     if (this.isRunning) return [];
@@ -42,50 +51,57 @@ export class InferenceEngine extends EventEmitter {
     this.lastRunAt = new Date().toISOString();
 
     try {
-      const summary = this.kg.getMemoryNodesSummary();
       const candidates = [];
 
-      // Seed from L1.5 insight-swarm output (cross-dimensional analysis).
-      // Prefer caller-supplied seeds (from `learn()`) to avoid re-running the
-      // swarm. Fall back to `getL2Seeds` for callers that instantiate the
-      // engine standalone.
+      // L1.5 passthrough (cross-dimensional analysis from the swarm).
+      // Caller-supplied `seeds` (from learn()) take precedence so we don't
+      // re-invoke the LLM swarm — see `runTraitSynthesis` for the real
+      // cross-L1 pattern discovery path.
       const l1_5_seeds = this.seeds
         ? this.seeds.filter(i => i.l2_seed)
         : await getL2Seeds(this.kg, this.llmClient ? { llmClient: this.llmClient } : {});
-      candidates.push(...l1_5_seeds.map(seed => ({
-        question: seed.insight,
-        supporting_L1_facts: seed.supporting_facts || [],
-        confidence: seed.confidence,
-        second_order_effects: seed.derived_predictions || [],
-        source: 'l1.5-insight-swarm',
-        generated_at: new Date().toISOString()
-      })));
+      for (const seed of l1_5_seeds) {
+        const candidate = {
+          question: seed.insight,
+          supporting_L1_facts: seed.supporting_facts || [],
+          confidence: seed.confidence,
+          second_order_effects: seed.derived_predictions || [],
+          source: 'l1.5-insight-swarm',
+          generated_at: new Date().toISOString(),
+        };
+        // Inline gate — never allocate what we'll drop at the end.
+        if (
+          candidate.confidence >= this.confidenceThreshold &&
+          candidate.supporting_L1_facts.length >= this.minSupportingFacts
+        ) {
+          candidates.push(candidate);
+        }
+      }
 
-      // Generate candidates from belief-belief relationships
-      candidates.push(...this._inferFromBelief(summary.beliefs));
+      // Temporal patterns — linear O(N) scan over top-salient nodes only.
+      // Works on a bounded population so it can't blow up regardless of KG size.
+      const topBeliefs = (typeof this.kg.getTopSalient === 'function')
+        ? this.kg.getTopSalient({ types: ['belief'], limit: 100 }).map(a => a.node)
+        : (this.kg.getActiveBeliefs?.() || []).slice(0, 100);
+      const topPrefs = (typeof this.kg.getTopSalient === 'function')
+        ? this.kg.getTopSalient({ types: ['preference'], limit: 100 }).map(a => a.node)
+        : (this.kg.getActivePreferences?.() || []).slice(0, 100);
 
-      // Generate candidates from preference-identity relationships
-      candidates.push(...this._inferFromPreferenceIdentity(summary.preferences, summary.identities));
+      for (const candidate of this._inferFromTemporalPatterns(topBeliefs, topPrefs)) {
+        if (
+          candidate.confidence >= this.confidenceThreshold &&
+          candidate.supporting_L1_facts.length >= this.minSupportingFacts
+        ) {
+          candidates.push(candidate);
+        }
+      }
 
-      // Generate candidates from temporal patterns
-      candidates.push(...this._inferFromTemporalPatterns(summary.beliefs, summary.preferences));
-
-      // Generate candidates from confidence gaps
-      candidates.push(...this._inferFromConfidenceGaps(summary));
-
-      // Filter by gate criteria
-      const gatedCandidates = candidates.filter(c =>
-        c.confidence >= this.confidenceThreshold &&
-        c.supporting_L1_facts.length >= this.minSupportingFacts
-      );
-
-      // Queue and emit
-      for (const candidate of gatedCandidates) {
+      for (const candidate of candidates) {
         this.candidateQueue.push(candidate);
         this.emit('candidate', candidate);
       }
 
-      return gatedCandidates;
+      return candidates;
     } finally {
       this.isRunning = false;
     }
@@ -116,89 +132,6 @@ export class InferenceEngine extends EventEmitter {
       persisted.push(this.kg.addSynthesis(s));
     }
     return persisted;
-  }
-
-  /**
-   * Infer second-order questions from pairs of beliefs
-   * @private
-   */
-  _inferFromBelief(beliefs) {
-    const candidates = [];
-    if (beliefs.length < 2) return candidates;
-
-    for (let i = 0; i < beliefs.length - 1; i++) {
-      for (let j = i + 1; j < beliefs.length; j++) {
-        const b1 = beliefs[i];
-        const b2 = beliefs[j];
-
-        const factKey = `belief:${b1.topic}:${b2.topic}`;
-        if (this.processedFacts.has(factKey)) continue;
-        this.processedFacts.add(factKey);
-
-        // Question: how do these beliefs interact?
-        const question = `Given your belief about ${b1.topic} (${b1.claim}) and ${b2.topic} (${b2.claim}), how might they be related?`;
-        const confidence = (b1.strength + b2.strength) / 2 * 0.8; // Reduce for inference uncertainty
-        const secondOrderEffects = [
-          `May create a unified mental model across ${b1.topic} and ${b2.topic}`,
-          `Potential conflict resolution or integration point`,
-          `Could influence decision-making in domains spanning both topics`
-        ];
-
-        candidates.push({
-          question,
-          supporting_L1_facts: [
-            { type: 'belief', topic: b1.topic, claim: b1.claim, strength: b1.strength },
-            { type: 'belief', topic: b2.topic, claim: b2.claim, strength: b2.strength }
-          ],
-          confidence: Math.min(0.95, confidence),
-          second_order_effects: secondOrderEffects,
-          source: 'belief-belief-relationship',
-          generated_at: new Date().toISOString()
-        });
-      }
-    }
-
-    return candidates;
-  }
-
-  /**
-   * Infer from preference-identity relationships
-   * @private
-   */
-  _inferFromPreferenceIdentity(preferences, identities) {
-    const candidates = [];
-    if (preferences.length === 0 || identities.length === 0) return candidates;
-
-    for (const pref of preferences) {
-      for (const identity of identities) {
-        const factKey = `pref-identity:${pref.type}:${identity.role}`;
-        if (this.processedFacts.has(factKey)) continue;
-        this.processedFacts.add(factKey);
-
-        const prefStr = pref.strength > 0 ? 'prefer' : 'dislike';
-        const question = `As a ${identity.role}, does your ${prefStr} for ${pref.description} align with your identity in ${identity.context}?`;
-        const confidence = Math.abs(pref.strength) * identity.salience * 0.85;
-        const secondOrderEffects = [
-          `May reinforce or challenge your ${identity.role} identity`,
-          `Could influence behavior patterns in roles requiring this identity`,
-          `Potential for identity-driven preference evolution`
-        ];
-
-        candidates.push({
-          question,
-          supporting_L1_facts: [
-            { type: 'preference', pref_type: pref.type, description: pref.description, strength: pref.strength },
-            { type: 'identity', role: identity.role, context: identity.context, salience: identity.salience }
-          ],
-          confidence: Math.min(0.95, confidence),
-          second_order_effects: secondOrderEffects,
-          source: 'preference-identity-alignment',
-          generated_at: new Date().toISOString()
-        });
-      }
-    }
-
-    return candidates;
   }
 
   /**
@@ -270,63 +203,6 @@ export class InferenceEngine extends EventEmitter {
           confidence: Math.min(0.95, confidence),
           second_order_effects: secondOrderEffects,
           source: 'evolving-preference-detection',
-          generated_at: new Date().toISOString()
-        });
-      }
-    }
-
-    return candidates;
-  }
-
-  /**
-   * Infer from confidence gaps: domains with low confidence but relevant beliefs
-   * @private
-   */
-  _inferFromConfidenceGaps(summary) {
-    const candidates = [];
-
-    // Map beliefs to domains
-    const beliefsByDomain = new Map();
-    for (const belief of summary.beliefs) {
-      if (!beliefsByDomain.has(belief.topic)) {
-        beliefsByDomain.set(belief.topic, []);
-      }
-      beliefsByDomain.get(belief.topic).push(belief);
-    }
-
-    // Find domains with high belief strength but low confidence
-    for (const [domain, beliefs] of beliefsByDomain) {
-      const avgStrength = beliefs.reduce((s, b) => s + b.strength, 0) / beliefs.length;
-      const confidence = summary.confidence[domain] ?? 0.5;
-
-      if (avgStrength > 0.6 && confidence < 0.5) {
-        const factKey = `gap:${domain}`;
-        if (this.processedFacts.has(factKey)) continue;
-        this.processedFacts.add(factKey);
-
-        const question = `You have strong beliefs about ${domain} but express low confidence. Should we strengthen your confidence in this area?`;
-        const inferenceConfidence = Math.abs(avgStrength - confidence) * 0.9;
-        const secondOrderEffects = [
-          `May reveal imposter syndrome or domain expertise underestimation`,
-          `Could lead to calibrated confidence scoring`,
-          `May increase decision-making authority in this domain`
-        ];
-
-        candidates.push({
-          question,
-          supporting_L1_facts: beliefs.slice(0, 2).map(b => ({
-            type: 'belief',
-            topic: b.topic,
-            claim: b.claim,
-            strength: b.strength
-          })).concat({
-            type: 'confidence',
-            domain,
-            confidence: confidence
-          }),
-          confidence: Math.min(0.95, inferenceConfidence),
-          second_order_effects: secondOrderEffects,
-          source: 'confidence-gap-detection',
           generated_at: new Date().toISOString()
         });
       }

@@ -222,7 +222,8 @@ cd marble && npm install && npm test
 | Mode | What it does | Use case |
 |------|-------------|----------|
 | **Score** (v1) | Deterministic scoring against user KG | Fast, predictable, no API calls |
-| **Swarm** (v2) | Multi-agent evaluation with 5 specialized lenses | Richer selection, catches what scoring misses |
+| **Swarm** (v2) | Multi-agent evaluation with 6 specialized lenses (injectable — see `new Swarm(kg, { lenses })`) | Richer selection, catches what scoring misses |
+| **Debate** (v2+) | Swarm + a second LLM round on items where agents disagree (variance > 0.04) | When divergent agent opinions should be reconciled, not just averaged |
 | **WorldSim** (v3) | Population-level simulation for product-market fit | B2B — "which users for this product?" |
 
 ### The Magic Score
@@ -239,9 +240,9 @@ magic_score = interest(0.25) + temporal(0.30) + novelty(0.20)
 - **Actionability (15%)** — Can the user act on this?
 - **Source trust (10%)** — Learned per-source credibility
 
-### Swarm Agents
+### Swarm Agents (default lens set)
 
-Five agents, each asking a different question:
+Six agents, each asking a different question. The set is the default when `new Swarm(kg)` is constructed without a `lenses` option; callers can inject their own lens array for tailored/per-user curation.
 
 | Agent | Weight | Question |
 |-------|--------|----------|
@@ -250,6 +251,9 @@ Five agents, each asking a different question:
 | Serendipity | 20% | "Would this delight them unexpectedly?" |
 | Growth | 15% | "Will this stretch their thinking?" |
 | Contrarian | 15% | "What is everyone else missing?" |
+| Social Proof | 10% | "How well-received is this among the broader population and similar users?" |
+
+> **Note on "swarm" naming.** Marble has three distinct systems all called "swarm" — this one (narrative curation with static-by-default lenses), `generateAgentFleet` (programmatic per-story scoring, always dynamic), and `runInsightSwarm` (L1.5 psychological probing, always dynamic). They don't share wiring. See [docs/architecture.md](docs/architecture.md#swarm-systems--three-parallel-purpose-built-layers) for the distinction.
 
 ## Architecture
 

@@ -167,10 +167,11 @@ Every synthesis has one of five `origin` values — downstream can filter by ori
 │               + source_trust(0.10) × freshness_decay     │
 │                                                          │
 │  Swarm mode (v2):                                        │
-│    Clone → 5 agents evaluate in parallel                 │
+│    Clone → 6 agents evaluate in parallel                 │
 │    Career(25%) | Timing(25%) | Serendipity(20%)          │
-│    Growth(15%) | Contrarian(15%)                         │
+│    Growth(15%) | Contrarian(15%) | Social Proof(10%)     │
 │    → Weighted consensus → top candidates                 │
+│    Lenses injectable via new Swarm(kg, { lenses })       │
 ├─────────────────────────────────────────────────────────┤
 │  3. ARC REORDER                                          │
 │  Sequence into narrative flow:                           │

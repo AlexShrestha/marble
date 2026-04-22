@@ -253,7 +253,7 @@ const result = swarm.score(story, context);
 // }
 ```
 
-**Agent weights:**
+**Default lens set (6 agents):**
 
 | Agent | Weight | Lens |
 |-------|--------|------|
@@ -262,6 +262,24 @@ const result = swarm.score(story, context);
 | Serendipity | 0.20 | Delightful, inspiring, unexpected connections |
 | Growth | 0.15 | Adjacent interests, emerging fields |
 | Contrarian | 0.15 | Under-covered, challenges assumptions |
+| Social Proof | 0.10 | Community validation, popularity among similar users |
+
+**Injecting a custom lens set:**
+
+```javascript
+const swarm = new Swarm(kg, {
+  mode: 'deep',
+  llm: yourLLM,
+  lenses: [
+    { name: 'Domain Expert', mandate: '...', weight: 0.4 },
+    { name: 'Skeptic',       mandate: '...', weight: 0.3 },
+    { name: 'Novice',        mandate: '...', weight: 0.3 },
+  ],
+});
+const ranked = await swarm.curate(stories);
+```
+
+Each lens must be `{ name, mandate, weight }`. When `lenses` is omitted, the default 6-agent fleet above is used. For programmatic per-story scoring with dynamic agents (a different paradigm), see `generateAgentFleet()` / `swarmScore()` — those produce scoring functions, not narrative picks.
 
 ### `swarm.rank(stories, options) → RankedStory[]`
 

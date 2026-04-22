@@ -24,6 +24,10 @@ export class InferenceEngine extends EventEmitter {
     this.confidenceThreshold = opts.confidenceThreshold || 0.65;
     this.minSupportingFacts = opts.minSupportingFacts || 2;
     this.llmClient = opts.llmClient || null;
+    // Pre-built L1.5 insights from the caller. When provided we skip the
+    // LLM swarm — `learn()` already ran it and a second call would both
+    // double the LLM spend and introduce a second failure surface.
+    this.seeds = Array.isArray(opts.seeds) ? opts.seeds : null;
     this.isRunning = false;
     this.lastRunAt = null;
   }
@@ -42,15 +46,17 @@ export class InferenceEngine extends EventEmitter {
       const candidates = [];
 
       // Seed from L1.5 insight-swarm output (cross-dimensional analysis).
-      // Forward `llmClient` so L1.5 runs against the user-supplied LLM when
-      // Marble was constructed with `{ llm }`; otherwise insight-swarm falls
-      // back to env-based provider discovery.
-      const l1_5_seeds = await getL2Seeds(this.kg, this.llmClient ? { llmClient: this.llmClient } : {});
+      // Prefer caller-supplied seeds (from `learn()`) to avoid re-running the
+      // swarm. Fall back to `getL2Seeds` for callers that instantiate the
+      // engine standalone.
+      const l1_5_seeds = this.seeds
+        ? this.seeds.filter(i => i.l2_seed)
+        : await getL2Seeds(this.kg, this.llmClient ? { llmClient: this.llmClient } : {});
       candidates.push(...l1_5_seeds.map(seed => ({
         question: seed.insight,
         supporting_L1_facts: seed.supporting_facts || [],
         confidence: seed.confidence,
-        second_order_effects: seed.implications || [],
+        second_order_effects: seed.derived_predictions || [],
         source: 'l1.5-insight-swarm',
         generated_at: new Date().toISOString()
       })));

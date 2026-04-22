@@ -1652,7 +1652,8 @@ export class KnowledgeGraph {
       confidence: {},     // Confidence by domain: { domain: confidence_score (0-1) }
       clones: [],         // UserClone hypothesis array
       episodes: [],       // Source records: { id, source, source_date, ingested_at, content_hash, content_summary?, metadata? }
-      entities: []        // Canonical entities: { id, canonical, aliases: [], embedding? } — collapses "BSB" ↔ "British School Barcelona"
+      entities: [],       // Canonical entities: { id, canonical, aliases: [], embedding? } — collapses "BSB" ↔ "British School Barcelona"
+      insights: []        // L1.5 insight-swarm output: { insight, question, confidence, supporting_facts, lens, agent, source_layer, l2_seed, ... }
     };
   }
 

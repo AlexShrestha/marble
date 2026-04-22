@@ -474,6 +474,8 @@ export class Marble {
     try {
       const { runInsightSwarm } = await import('./insight-swarm.js');
       insights = await runInsightSwarm(this.kg, { llmClient });
+      if (!Array.isArray(this.kg.user.insights)) this.kg.user.insights = [];
+      this.kg.user.insights = insights;
       recordLayerContribution(bundle, 'insightSwarm', { insights });
       stages.insightSwarm = 'ok';
     } catch (err) {
@@ -481,11 +483,13 @@ export class Marble {
       pushFailure('insightSwarm', err);
     }
 
-    // L2: Inference Engine — generate candidates from L1 facts + L1.5 insights
+    // L2: Inference Engine — generate candidates from L1 facts + L1.5 insights.
+    // Pass the insights we just computed as pre-built seeds so InferenceEngine
+    // doesn't re-invoke the LLM swarm (expensive and a second failure surface).
     let candidates = [];
     try {
       const { InferenceEngine } = await import('./inference-engine.js');
-      const inference = new InferenceEngine(this.kg, { llmClient });
+      const inference = new InferenceEngine(this.kg, { llmClient, seeds: insights });
       candidates = await inference.run();
       recordLayerContribution(bundle, 'inferenceEngine', { hypotheses: candidates });
       stages.inference = 'ok';

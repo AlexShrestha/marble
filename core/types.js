@@ -407,6 +407,51 @@ export const CALIBRATION_STATUS = {
  * @property {'active'|'killed'} status
  */
 
+/**
+ * @typedef {Object} SynthesisTrait
+ * @property {string} dimension  - e.g. "time_orientation", "effort_profile"
+ * @property {string} value      - e.g. "compound", "peak_driven"
+ * @property {number} weight     - 0-1, how strongly this trait applies
+ */
+
+/**
+ * @typedef {Object} ConfidenceComponents
+ * @property {number}  base_from_llm        - LLM-stated confidence for the trait
+ * @property {number}  replication_bonus    - Bonus from cross-node reinforcement
+ * @property {number}  contradiction_penalty - Penalty from contradicting evidence
+ * @property {boolean} cross_domain         - Reinforcing nodes span >1 domain
+ */
+
+/**
+ * @typedef {'single_node'|'trait_replication'|'contradiction'|'emergent_fusion'} SynthesisOrigin
+ *   - single_node: trait implied by exactly one node — low confidence by design
+ *   - trait_replication: same trait implied by multiple nodes, optionally across domains
+ *   - contradiction: same dimension, divergent values from disjoint node sets
+ *   - emergent_fusion: gestalt pattern from K-way cross-domain sample; no single-node derivation
+ */
+
+/**
+ * @typedef {Object} Synthesis
+ * @property {string}   id                    - Stable record id
+ * @property {string}   label                 - Short human handle (not the payload)
+ * @property {SynthesisOrigin} origin
+ * @property {SynthesisTrait}  trait
+ * @property {string}   mechanics             - 2-4 sentences explaining WHY this pattern coheres
+ * @property {string[]} reinforcing_nodes     - Node refs that support the trait (e.g. "belief:running")
+ * @property {string[]} contradicting_nodes   - Node refs that undermine it (contradiction case only)
+ * @property {string[]} domains_bridged       - Unique domains across reinforcing nodes
+ * @property {boolean}  isolated              - True when only one node supports the trait
+ * @property {number}   confidence            - Final composite confidence 0-1
+ * @property {ConfidenceComponents} confidence_components
+ * @property {string[]} affinities            - Content types that should match this pattern
+ * @property {string[]} aversions             - Content types that should be deprioritized
+ * @property {string[]} predictions           - Falsifiable observable behaviors
+ * @property {boolean}  surprising            - Flagged as non-obvious (useful for ranking)
+ * @property {string}   generated_at          - ISO timestamp
+ * @property {string}   [model]               - LLM model id used
+ * @property {string}   mode                  - Which engine mode emitted this ("trait_synthesis" | "fusion")
+ */
+
 export const EXTENDED_USE_CASE_CONFIGS = {
   ...USE_CASE_CONFIGS,
   ecommerce: {

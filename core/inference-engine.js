@@ -92,6 +92,33 @@ export class InferenceEngine extends EventEmitter {
   }
 
   /**
+   * Run L2 trait synthesis — third inference mode alongside L1.5 passthrough
+   * and pairwise L1. Derives psychological/behavioral traits from individual
+   * facts, checks replication across domains, surfaces contradictions, and
+   * runs a small K-way fusion pass on top. Persists results via
+   * `kg.addSynthesis()`.
+   *
+   * The heavy logic lives in `trait-synthesis.js` — this method is a thin
+   * wrapper that threads `llmClient` through and writes the results back
+   * into the KG.
+   *
+   * @param {Object} [opts] — see `runTraitSynthesis` in trait-synthesis.js
+   * @returns {Promise<Object[]>} persisted syntheses (with ids)
+   */
+  async runTraitSynthesis(opts = {}) {
+    const { runTraitSynthesis } = await import('./trait-synthesis.js');
+    const syntheses = await runTraitSynthesis(this.kg, {
+      ...opts,
+      llmClient: opts.llmClient || this.llmClient || undefined,
+    });
+    const persisted = [];
+    for (const s of syntheses) {
+      persisted.push(this.kg.addSynthesis(s));
+    }
+    return persisted;
+  }
+
+  /**
    * Infer second-order questions from pairs of beliefs
    * @private
    */

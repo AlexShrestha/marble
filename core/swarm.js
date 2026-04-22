@@ -873,9 +873,11 @@ const _URL_PATTERN = /https?:\/\/([^\s\/]+)/gi;
  *
  * @param {string} contentSample - Title + summary + url, etc.
  * @param {boolean} [useLLM=false] - Force LLM if heuristics are inconclusive
+ * @param {Object}  [opts]
+ * @param {Object}  [opts.llmClient] - Pre-built Anthropic-shape client (overrides env discovery)
  * @returns {Promise<{domain: string, availableSignals: string[], contextHint: string}>}
  */
-export async function detectDomain(contentSample, useLLM = false) {
+export async function detectDomain(contentSample, useLLM = false, opts = {}) {
   if (!contentSample || typeof contentSample !== 'string') {
     return { domain: 'unknown', availableSignals: [], contextHint: 'No content to analyze' };
   }
@@ -906,7 +908,7 @@ export async function detectDomain(contentSample, useLLM = false) {
 
   if (!detectedDomain && (useLLM || signals.length === 0)) {
     try {
-      const client = createLLMClient();
+      const client = opts.llmClient || createLLMClient();
       const response = await client.messages.create({
         model: process.env.MARBLE_LLM_MODEL || defaultModel('fast'),
         max_tokens: 150,

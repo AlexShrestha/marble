@@ -428,6 +428,15 @@ export class Marble {
     const cloneStatusBefore = new Map();
     for (const c of this.kg.user.clones || []) cloneStatusBefore.set(c.id, c.status);
 
+    // Resolve a single LLM client for this learn() run. If the user passed
+    // `opts.llm` (a raw `(prompt) => string` function) to the Marble
+    // constructor, wrap it so downstream code that expects the Anthropic
+    // `messages.create()` shape (seedClones, L1.5 insight-swarm, L2
+    // inference) uses it instead of silently falling back to env-based
+    // provider discovery.
+    const { createLLMClient, wrapUserLLM } = await import('./llm-provider.js');
+    const llmClient = this.llm ? wrapUserLLM(this.llm) : createLLMClient();
+
     // Seed clones if none exist. Persist the returned array — historically
     // the result was discarded, so seeded clones never reached `user.clones`
     // and every downstream `clones === 0` check looked identical to a cold
@@ -436,9 +445,7 @@ export class Marble {
     const existingClones = this.kg.getActiveClones();
     if (existingClones.length === 0 && typeof this.kg.seedClones === 'function') {
       try {
-        const { createLLMClient } = await import('./llm-provider.js');
-        const client = createLLMClient();
-        const seeded = await this.kg.seedClones(client, client.defaultModel('fast'));
+        const seeded = await this.kg.seedClones(llmClient, llmClient.defaultModel('fast'));
         if (Array.isArray(seeded) && seeded.length > 0) {
           for (const clone of seeded) this.kg.saveClone(clone);
           stages.seedClones = 'ok';
@@ -466,7 +473,7 @@ export class Marble {
     let insights = [];
     try {
       const { runInsightSwarm } = await import('./insight-swarm.js');
-      insights = await runInsightSwarm(this.kg);
+      insights = await runInsightSwarm(this.kg, { llmClient });
       recordLayerContribution(bundle, 'insightSwarm', { insights });
       stages.insightSwarm = 'ok';
     } catch (err) {
@@ -478,7 +485,7 @@ export class Marble {
     let candidates = [];
     try {
       const { InferenceEngine } = await import('./inference-engine.js');
-      const inference = new InferenceEngine(this.kg);
+      const inference = new InferenceEngine(this.kg, { llmClient });
       candidates = await inference.run();
       recordLayerContribution(bundle, 'inferenceEngine', { hypotheses: candidates });
       stages.inference = 'ok';

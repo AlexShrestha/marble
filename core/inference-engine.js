@@ -23,6 +23,7 @@ export class InferenceEngine extends EventEmitter {
     this.processedFacts = new Set();
     this.confidenceThreshold = opts.confidenceThreshold || 0.65;
     this.minSupportingFacts = opts.minSupportingFacts || 2;
+    this.llmClient = opts.llmClient || null;
     this.isRunning = false;
     this.lastRunAt = null;
   }
@@ -40,8 +41,11 @@ export class InferenceEngine extends EventEmitter {
       const summary = this.kg.getMemoryNodesSummary();
       const candidates = [];
 
-      // Seed from L1.5 insight-swarm output (cross-dimensional analysis)
-      const l1_5_seeds = await getL2Seeds(this.kg);
+      // Seed from L1.5 insight-swarm output (cross-dimensional analysis).
+      // Forward `llmClient` so L1.5 runs against the user-supplied LLM when
+      // Marble was constructed with `{ llm }`; otherwise insight-swarm falls
+      // back to env-based provider discovery.
+      const l1_5_seeds = await getL2Seeds(this.kg, this.llmClient ? { llmClient: this.llmClient } : {});
       candidates.push(...l1_5_seeds.map(seed => ({
         question: seed.insight,
         supporting_L1_facts: seed.supporting_facts || [],

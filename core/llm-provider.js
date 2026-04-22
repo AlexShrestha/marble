@@ -120,6 +120,43 @@ export function createLLMClient(opts = {}) {
 }
 
 /**
+ * Wrap a user-supplied `async (prompt: string) => string` function into an
+ * Anthropic-shape client that exposes `messages.create({ model, max_tokens, messages })`.
+ *
+ * This lets callers that expect the internal client shape (kg.seedClones,
+ * runInsightSwarm, InferenceEngine, etc.) use a raw user LLM function
+ * without each call site needing its own adapter.
+ *
+ * Multi-message arrays are flattened into a single text prompt; callers that
+ * need structured turn-taking with a non-Anthropic provider should build
+ * their own client rather than pass a raw function.
+ *
+ * @param {Function} userFn - async (prompt: string) => string
+ * @param {Object} [opts]
+ * @param {string} [opts.provider='custom'] - Provider label for diagnostics
+ * @param {string} [opts.model='user-supplied'] - Model label returned by defaultModel()
+ * @returns {{ messages: { create: Function }, provider: string, defaultModel: Function }}
+ */
+export function wrapUserLLM(userFn, { provider = 'custom', model = 'user-supplied' } = {}) {
+  if (typeof userFn !== 'function') {
+    throw new TypeError('[llm-provider] wrapUserLLM requires an async (prompt) => string function');
+  }
+  return {
+    provider,
+    defaultModel: () => model,
+    messages: {
+      async create({ messages } = {}) {
+        const prompt = (messages || [])
+          .map(m => m.role === 'user' ? m.content : `[${m.role}]: ${m.content}`)
+          .join('\n\n');
+        const text = await userFn(prompt);
+        return { content: [{ type: 'text', text: String(text ?? '') }] };
+      },
+    },
+  };
+}
+
+/**
  * Get the default model name for a given tier and provider.
  * @param {'heavy'|'fast'} tier
  * @param {string} [provider]

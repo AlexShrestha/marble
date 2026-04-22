@@ -598,6 +598,31 @@ export class Marble {
   }
 
   /**
+   * Run L2 trait synthesis — derive psychological/behavioral traits from
+   * individual facts, check whether those traits replicate across domains
+   * or get contradicted elsewhere in the KG, and run a small K-way fusion
+   * pass for emergent gestalt patterns.
+   *
+   * Output syntheses are persisted to `kg.user.syntheses` and returned.
+   * Designed to run AFTER `learn()` + `investigate()` so the full multi-layer
+   * KG is available as raw material.
+   *
+   * @param {Object} [opts] - see runTraitSynthesis in trait-synthesis.js
+   * @returns {Promise<Object[]>} the persisted Synthesis records
+   */
+  async synthesize(opts = {}) {
+    if (!this.ready) await this.init();
+
+    const llmClient = opts.llmClient || this.llm || undefined;
+    const { InferenceEngine } = await import('./inference-engine.js');
+    const engine = new InferenceEngine(this.kg, { llmClient });
+
+    const syntheses = await engine.runTraitSynthesis({ ...opts, llmClient });
+    await this.kg.save();
+    return syntheses;
+  }
+
+  /**
    * Run deep investigation of the user profile.
    * Assembles a per-user committee, generates questions, answers from data sources,
    * cross-references findings, debates.

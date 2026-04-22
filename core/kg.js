@@ -1653,7 +1653,8 @@ export class KnowledgeGraph {
       clones: [],         // UserClone hypothesis array
       episodes: [],       // Source records: { id, source, source_date, ingested_at, content_hash, content_summary?, metadata? }
       entities: [],       // Canonical entities: { id, canonical, aliases: [], embedding? } — collapses "BSB" ↔ "British School Barcelona"
-      insights: []        // L1.5 insight-swarm output: { insight, question, confidence, supporting_facts, lens, agent, source_layer, l2_seed, ... }
+      insights: [],       // L1.5 insight-swarm output: { insight, question, confidence, supporting_facts, lens, agent, source_layer, l2_seed, ... }
+      syntheses: []       // L2 trait-synthesis output: { id, label, origin, trait, mechanics, reinforcing_nodes, contradicting_nodes, domains_bridged, confidence, confidence_components, affinities, aversions, predictions, surprising, ... }
     };
   }
 
@@ -1897,5 +1898,85 @@ Return ONLY the JSON object.`,
       bred += 1;
     }
     return { bred, failures };
+  }
+
+  // ── Syntheses (L2 trait synthesis) ──────────────────────────────────────
+
+  /**
+   * Persist a synthesis record. Assigns a stable id and generated_at if the
+   * caller didn't provide them. Syntheses with matching (origin, dimension,
+   * value) are upserted in place so re-runs of trait synthesis don't
+   * duplicate the same pattern — the newer record wins when its confidence
+   * is higher, otherwise the older one is kept.
+   *
+   * @param {Object} synthesis
+   * @returns {Object} the stored record
+   */
+  addSynthesis(synthesis) {
+    if (!this.user.syntheses) this.user.syntheses = [];
+    const record = { ...synthesis };
+    if (!record.id) {
+      record.id = `synth_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    }
+    if (!record.generated_at) record.generated_at = new Date().toISOString();
+
+    const key = `${record.origin}|${record.trait?.dimension}|${record.trait?.value}`;
+    const idx = this.user.syntheses.findIndex(s =>
+      `${s.origin}|${s.trait?.dimension}|${s.trait?.value}` === key
+    );
+    if (idx !== -1) {
+      const existing = this.user.syntheses[idx];
+      if ((record.confidence ?? 0) >= (existing.confidence ?? 0)) {
+        // Preserve the original id so callers' references stay valid.
+        record.id = existing.id;
+        this.user.syntheses[idx] = record;
+      }
+      return this.user.syntheses[idx];
+    }
+    this.user.syntheses.push(record);
+    return record;
+  }
+
+  /**
+   * Query syntheses with optional filters.
+   *
+   * @param {Object} [opts]
+   * @param {number}   [opts.minConfidence]       - Drop below this.
+   * @param {string}   [opts.origin]              - "single_node" | "trait_replication" | "contradiction" | "emergent_fusion"
+   * @param {boolean}  [opts.surprising]          - Only return records flagged surprising.
+   * @param {Object}   [opts.trait]               - Match trait.dimension / trait.value (both optional).
+   * @param {string[]} [opts.domainsIncludes]     - Match syntheses whose domains_bridged includes ALL of these.
+   * @returns {Object[]}
+   */
+  getSyntheses(opts = {}) {
+    const all = this.user.syntheses || [];
+    return all.filter(s => {
+      if (opts.minConfidence != null && (s.confidence ?? 0) < opts.minConfidence) return false;
+      if (opts.origin && s.origin !== opts.origin) return false;
+      if (opts.surprising === true && !s.surprising) return false;
+      if (opts.trait?.dimension && s.trait?.dimension !== opts.trait.dimension) return false;
+      if (opts.trait?.value && s.trait?.value !== opts.trait.value) return false;
+      if (Array.isArray(opts.domainsIncludes) && opts.domainsIncludes.length > 0) {
+        const have = new Set(s.domains_bridged || []);
+        if (!opts.domainsIncludes.every(d => have.has(d))) return false;
+      }
+      return true;
+    });
+  }
+
+  /**
+   * Return syntheses whose provenance mentions the given node ref
+   * (reinforcing or contradicting side). Useful for "what patterns does
+   * this fact support or undermine?" queries.
+   *
+   * @param {string} nodeRef - e.g. "belief:running", "preference:pace"
+   * @returns {Object[]}
+   */
+  getSynthesesForNode(nodeRef) {
+    const all = this.user.syntheses || [];
+    return all.filter(s =>
+      (s.reinforcing_nodes || []).includes(nodeRef) ||
+      (s.contradicting_nodes || []).includes(nodeRef)
+    );
   }
 }
